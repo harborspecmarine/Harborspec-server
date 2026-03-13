@@ -116,18 +116,34 @@ def get_email_body(msg):
     return msg.get_payload(decode=True).decode('utf-8', errors='ignore')
 
 
+def attach_pdf(msg, pdf_path, invoice_num):
+    """Attach invoice PDF to a MIMEMultipart message."""
+    try:
+        with open(pdf_path, 'rb') as f:
+            part = MIMEBase('application', 'octet-stream')
+            part.set_payload(f.read())
+            encoders.encode_base64(part)
+            part.add_header('Content-Disposition', f'attachment; filename="invoice_{invoice_num}.pdf"')
+            msg.attach(part)
+    except Exception as e:
+        print(f"  PDF attach error: {e}")
+
+
 def send_invoice_email(order, pdf_path, invoice_num):
-    """Send invoice PDF to orders inbox via SMTP."""
-    msg = MIMEMultipart()
-    msg['From']    = SMTP_USER
-    msg['To']      = ORDERS_EMAIL
-    msg['Subject'] = f"Invoice {invoice_num} — {order.get('name', 'New Order')}"
+    """Send invoice PDF to orders inbox AND customer."""
 
     items_lines = '\n'.join(
         f"  • {i['name']} x{i['qty']} | {i['color']}{'(+$5)' if i.get('colorExtra') else ''} | {i['mounting']}"
         for i in order.get('items', [])
     )
-    body_text = f"""New HarborSPEC order received.
+
+    # ── EMAIL TO YOU (internal copy) ──────────────────────────────
+    owner_msg = MIMEMultipart()
+    owner_msg['From']    = SMTP_USER
+    owner_msg['To']      = ORDERS_EMAIL
+    owner_msg['Subject'] = f"New Order — Invoice {invoice_num} — {order.get('name', '')}"
+
+    owner_body = f"""New HarborSPEC order received.
 
 Invoice:  {invoice_num}
 Customer: {order.get('name','')}
@@ -142,27 +158,66 @@ Items:
 
 Notes: {order.get('notes','None')}
 
-Invoice PDF is attached.
-Reply to this email to reach the customer at {order.get('email','')}.
+Invoice PDF attached. Customer has received their copy.
+Reply to this email to contact: {order.get('email','')}
 """
-    msg.attach(MIMEText(body_text, 'plain'))
+    owner_msg.attach(MIMEText(owner_body, 'plain'))
+    attach_pdf(owner_msg, pdf_path, invoice_num)
 
-    # Attach invoice PDF
-    try:
-        with open(pdf_path, 'rb') as f:
-            part = MIMEBase('application', 'octet-stream')
-            part.set_payload(f.read())
-            encoders.encode_base64(part)
-            part.add_header('Content-Disposition', f'attachment; filename="invoice_{invoice_num}.pdf"')
-            msg.attach(part)
-    except Exception as e:
-        print(f"  PDF attach error: {e}")
+    # ── EMAIL TO CUSTOMER ─────────────────────────────────────────
+    customer_email = order.get('email', '').strip()
+    customer_msg = None
+    if customer_email:
+        customer_msg = MIMEMultipart()
+        customer_msg['From']    = SMTP_USER
+        customer_msg['To']      = customer_email
+        customer_msg['Reply-To'] = ORDERS_EMAIL
+        customer_msg['Subject'] = f"Your HarborSPEC Order — Invoice {invoice_num}"
 
+        customer_body = f"""Thank you for your order, {order.get('name','').split()[0] if order.get('name') else 'Captain'}.
+
+Your order confirmation and invoice are attached. Please review and keep for your records.
+
+INVOICE:  {invoice_num}
+VESSEL:   {order.get('vessel','N/A')}
+
+ITEMS ORDERED:
+{items_lines}
+
+SHIP TO:
+{order.get('address','')}
+{order.get('city','')+', ' if order.get('city') else ''}{order.get('state','')} {order.get('zip','')}
+{('County: ' + order['county']) if order.get('county') else ''}
+
+NOTES: {order.get('notes','None')}
+
+---
+PAYMENT
+We will be in touch shortly to process payment. You can also reply to this email or call us at any time to provide payment.
+
+Payment is due within 7 days. Production begins after payment is received.
+Standard lead time is 2 weeks from payment. Rush orders (+25%) available on request.
+
+---
+QUESTIONS?
+Reply to this email or contact us at {ORDERS_EMAIL}
+
+Thank you for your business.
+HarborSPEC\u2122
+harborspecmarine.com
+"""
+        customer_msg.attach(MIMEText(customer_body, 'plain'))
+        attach_pdf(customer_msg, pdf_path, invoice_num)
+
+    # ── SEND BOTH ─────────────────────────────────────────────────
     try:
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
             server.login(SMTP_USER, SMTP_PASS)
-            server.sendmail(SMTP_USER, ORDERS_EMAIL, msg.as_string())
-        print(f"  Emailed invoice {invoice_num} to {ORDERS_EMAIL}")
+            server.sendmail(SMTP_USER, ORDERS_EMAIL, owner_msg.as_string())
+            print(f"  Invoice {invoice_num} sent to {ORDERS_EMAIL}")
+            if customer_msg and customer_email:
+                server.sendmail(SMTP_USER, customer_email, customer_msg.as_string())
+                print(f"  Invoice {invoice_num} sent to customer: {customer_email}")
         return True
     except Exception as e:
         print(f"  SMTP error: {e}")

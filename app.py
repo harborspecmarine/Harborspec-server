@@ -1,30 +1,33 @@
 """
-HarborSPEC™ Order Automation Server
-Receives Formspree webhook → generates invoice PDF → emails to orders inbox
+HarborSPEC™ Order Server
+Polls Gmail via IMAP every 5 minutes for Formspree order emails.
+Generates invoice PDF and emails it to orders inbox automatically.
+No OAuth required — uses Gmail App Password only.
 """
 
 from flask import Flask, request, jsonify
 from invoice import generate_invoice
 import smtplib
-import os
-import json
-import re
+import imaplib
+import email
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
 from email import encoders
+import os
+import re
+import threading
+import time
 from datetime import datetime
 
 app = Flask(__name__)
 
-# ── CONFIG (set as environment variables on Railway) ──
-ORDERS_EMAIL  = os.environ.get('ORDERS_EMAIL',  'harborspecmarineorders@gmail.com')
-SMTP_USER     = os.environ.get('SMTP_USER',     '')   # your Gmail address
-SMTP_PASS     = os.environ.get('SMTP_PASS',     '')   # Gmail App Password
-WEBHOOK_TOKEN = os.environ.get('WEBHOOK_TOKEN', '')   # secret token to verify requests
+ORDERS_EMAIL = os.environ.get('ORDERS_EMAIL', 'harborspecmarineorders@gmail.com')
+SMTP_USER    = os.environ.get('SMTP_USER',    '')
+SMTP_PASS    = os.environ.get('SMTP_PASS',    '')
+WEBHOOK_TOKEN = os.environ.get('WEBHOOK_TOKEN', '')
 
-# ── INVOICE COUNTER ──
-COUNTER_FILE = '/tmp/invoice_counter.txt'
+COUNTER_FILE = '/tmp/hs_counter.txt'
 
 def next_invoice_number():
     try:
@@ -35,17 +38,18 @@ def next_invoice_number():
     return f'HS-{n:04d}'
 
 
-# ── PARSE ORDER FROM FORMSPREE PAYLOAD ──
-def parse_order(data):
-    """
-    Formspree posts form fields as flat key/value pairs.
-    The cart posts: name, email, phone, vessel, address, city, state, zip,
-                    county, notes, order_summary, order_total, item_count
-    We reconstruct the items list from order_summary text.
-    """
+def parse_order_from_body(body):
+    """Parse a Formspree notification email body into an order dict."""
+    data = {}
+    for line in body.split('\n'):
+        line = line.strip()
+        if ':' in line:
+            key, _, val = line.partition(':')
+            data[key.strip().lower().replace(' ', '_')] = val.strip()
+
     order = {
         'name':    data.get('name', ''),
-        'email':   data.get('email', ''),
+        'email':   data.get('email', data.get('_replyto', '')),
         'phone':   data.get('phone', ''),
         'vessel':  data.get('vessel', ''),
         'address': data.get('address', ''),
@@ -57,165 +61,196 @@ def parse_order(data):
         'items':   [],
     }
 
-    # Parse items from the order_summary text block
-    # Format per cart.js: "Name xQTY | Color(+$5?) | Mounting | textType | $total"
-    summary = data.get('order_summary', '')
-    for line in summary.split('\n'):
-        line = line.strip()
-        if not line or line.startswith('ITEMS') or line.startswith('Subtotal') \
-           or line.startswith('Shipping') or line.startswith('Tax') \
-           or line.startswith('TOTAL') or line.startswith('CUSTOMER') \
-           or line.startswith('Name:') or line.startswith('Email:') \
-           or line.startswith('Phone:') or line.startswith('Vessel:') \
-           or line.startswith('Address:') or line.startswith('County:') \
-           or line.startswith('Notes:'):
-            continue
+    # Parse line items from ITEMS block in order_summary
+    if 'ITEMS' in body:
+        block = body[body.find('ITEMS') + 5:]
+        if 'CUSTOMER' in block:
+            block = block[:block.find('CUSTOMER')]
+        for line in block.split('\n'):
+            line = line.strip().lstrip('•').strip()
+            if not line:
+                continue
+            parts = [p.strip() for p in line.split('|')]
+            if len(parts) < 4:
+                continue
+            # Name + qty: "Pilot Card x1"
+            nq = parts[0]
+            qm = re.search(r'x(\d+)$', nq)
+            qty = int(qm.group(1)) if qm else 1
+            name = re.sub(r'\s*x\d+$', '', nq).strip()
+            # Color
+            cr = parts[1]
+            color_extra = '+$5' in cr
+            color = cr.replace('(+$5)', '').replace('+$5', '').strip()
+            mounting  = parts[2] if len(parts) > 2 else ''
+            text_type = parts[3] if len(parts) > 3 else 'standard'
+            # Price
+            pm = re.search(r'\$([\d.]+)', parts[-1]) if len(parts) > 4 else None
+            line_total = float(pm.group(1)) if pm else 0
+            unit_full  = (line_total / qty) if qty else 0
+            base_price = unit_full - (5 if color_extra else 0)
 
-        # Parse: "Pilot Card x1 | Black | 2-Screw Holes | standard | $60.00"
-        parts = [p.strip() for p in line.split('|')]
-        if len(parts) < 5:
-            continue
+            order['items'].append({
+                'name': name, 'price': base_price, 'qty': qty,
+                'color': color, 'colorExtra': color_extra,
+                'mounting': mounting, 'textType': text_type,
+            })
 
-        # Name and qty: "Pilot Card x1"
-        name_qty = parts[0].strip()
-        qty_match = re.search(r'x(\d+)$', name_qty)
-        qty = int(qty_match.group(1)) if qty_match else 1
-        name = re.sub(r'\s*x\d+$', '', name_qty).strip()
-
-        # Color: "Black" or "Ocean Blue (+$5)"
-        color_raw = parts[1].strip()
-        color_extra = '(+$5)' in color_raw
-        color = color_raw.replace('(+$5)', '').strip()
-
-        mounting  = parts[2].strip()
-        text_type = parts[3].strip()
-
-        # Unit price from line total / qty
-        price_match = re.search(r'\$([\d.]+)', parts[4])
-        line_total = float(price_match.group(1)) if price_match else 0
-        unit_full = line_total / qty if qty else 0
-        base_price = unit_full - (5 if color_extra else 0)
-
-        order['items'].append({
-            'name':       name,
-            'price':      base_price,
-            'qty':        qty,
-            'color':      color,
-            'colorExtra': color_extra,
-            'mounting':   mounting,
-            'textType':   text_type,
-        })
+    # Fallback if parsing failed
+    if not order['items']:
+        order['items'] = [{
+            'name': 'See order — vessel info sheet required',
+            'price': 0, 'qty': 1, 'color': 'TBD',
+            'colorExtra': False, 'mounting': 'TBD', 'textType': 'standard',
+        }]
 
     return order
 
 
-# ── SEND EMAIL WITH PDF ATTACHMENT ──
-def send_invoice_email(order, pdf_path, invoice_num):
-    if not SMTP_USER or not SMTP_PASS:
-        print("SMTP not configured — skipping email send")
-        return False
+def get_email_body(msg):
+    """Extract plain text body from email message."""
+    if msg.is_multipart():
+        for part in msg.walk():
+            if part.get_content_type() == 'text/plain':
+                return part.get_payload(decode=True).decode('utf-8', errors='ignore')
+    return msg.get_payload(decode=True).decode('utf-8', errors='ignore')
 
+
+def send_invoice_email(order, pdf_path, invoice_num):
+    """Send invoice PDF to orders inbox via SMTP."""
     msg = MIMEMultipart()
     msg['From']    = SMTP_USER
     msg['To']      = ORDERS_EMAIL
-    msg['Subject'] = f"New Order — {invoice_num} — {order['name']} — {order.get('order_total','')}"
+    msg['Subject'] = f"Invoice {invoice_num} — {order.get('name', 'New Order')}"
 
-    # Body
-    body = f"""New HarborSPEC order received.
+    items_lines = '\n'.join(
+        f"  • {i['name']} x{i['qty']} | {i['color']}{'(+$5)' if i.get('colorExtra') else ''} | {i['mounting']}"
+        for i in order.get('items', [])
+    )
+    body_text = f"""New HarborSPEC order received.
 
-Invoice: {invoice_num}
-Customer: {order['name']}
-Email: {order['email']}
-Phone: {order.get('phone','N/A')}
-Vessel: {order.get('vessel','N/A')}
-Ship to: {order['address']}, {order['city']}, {order['state']} {order['zip']}
+Invoice:  {invoice_num}
+Customer: {order.get('name','')}
+Email:    {order.get('email','')}
+Phone:    {order.get('phone','N/A')}
+Vessel:   {order.get('vessel','N/A')}
+Ship to:  {order.get('address','')} {order.get('city','')} {order.get('state','')} {order.get('zip','')}
 {('County: ' + order['county']) if order.get('county') else ''}
 
 Items:
-{chr(10).join(f"  • {i['name']} x{i['qty']} — {i['color']}{'(+$5)' if i.get('colorExtra') else ''} — {i['mounting']}" for i in order['items'])}
+{items_lines}
 
 Notes: {order.get('notes','None')}
 
 Invoice PDF is attached.
-Reply to this email to reach the customer.
+Reply to this email to reach the customer at {order.get('email','')}.
 """
-    msg.attach(MIMEText(body, 'plain'))
+    msg.attach(MIMEText(body_text, 'plain'))
 
-    # Attach PDF
-    with open(pdf_path, 'rb') as f:
-        part = MIMEBase('application', 'octet-stream')
-        part.set_payload(f.read())
-        encoders.encode_base64(part)
-        part.add_header('Content-Disposition', f'attachment; filename="{os.path.basename(pdf_path)}"')
-        msg.attach(part)
+    # Attach invoice PDF
+    try:
+        with open(pdf_path, 'rb') as f:
+            part = MIMEBase('application', 'octet-stream')
+            part.set_payload(f.read())
+            encoders.encode_base64(part)
+            part.add_header('Content-Disposition', f'attachment; filename="invoice_{invoice_num}.pdf"')
+            msg.attach(part)
+    except Exception as e:
+        print(f"  PDF attach error: {e}")
 
-    # Send via Gmail SMTP
     try:
         with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
             server.login(SMTP_USER, SMTP_PASS)
             server.sendmail(SMTP_USER, ORDERS_EMAIL, msg.as_string())
-        print(f"Invoice emailed to {ORDERS_EMAIL}")
+        print(f"  Emailed invoice {invoice_num} to {ORDERS_EMAIL}")
         return True
     except Exception as e:
-        print(f"Email failed: {e}")
+        print(f"  SMTP error: {e}")
         return False
 
 
-# ── WEBHOOK ENDPOINT ──
-@app.route('/webhook/order', methods=['POST'])
-def handle_order():
-    # Optional token check
-    token = request.headers.get('X-Webhook-Token', '')
-    if WEBHOOK_TOKEN and token != WEBHOOK_TOKEN:
-        return jsonify({'error': 'Unauthorized'}), 401
+def check_gmail():
+    """Connect to Gmail via IMAP and process unread Formspree emails."""
+    if not SMTP_USER or not SMTP_PASS:
+        print("No credentials configured")
+        return
 
-    # Accept JSON or form data
-    if request.is_json:
-        data = request.get_json()
-    else:
-        data = request.form.to_dict()
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Checking Gmail...")
+    try:
+        mail = imaplib.IMAP4_SSL('imap.gmail.com')
+        mail.login(SMTP_USER, SMTP_PASS)
+        mail.select('inbox')
 
-    print(f"Order received: {data.get('name','?')} — {data.get('order_total','?')}")
+        # Find unread emails from Formspree
+        _, msgs = mail.search(None, '(UNSEEN FROM "formspree")')
+        ids = msgs[0].split()
 
-    # Parse order
-    order = parse_order(data)
-    if not order['items']:
-        # Fallback: create a single generic line item from order_total
-        total_str = data.get('order_total', '$0')
+        if not ids or ids == [b'']:
+            print(f"  No new orders")
+            mail.logout()
+            return
+
+        print(f"  {len(ids)} new order email(s) found")
+
+        for eid in ids:
+            try:
+                _, data = mail.fetch(eid, '(RFC822)')
+                msg = email.message_from_bytes(data[0][1])
+                body = get_email_body(msg)
+                order = parse_order_from_body(body)
+
+                invoice_num = next_invoice_number()
+                order['invoice_num'] = invoice_num
+                pdf_path = f'/tmp/invoice_{invoice_num}.pdf'
+
+                generate_invoice(order, output_path=pdf_path)
+                send_invoice_email(order, pdf_path, invoice_num)
+
+                # Mark as read so we don't process it again
+                mail.store(eid, '+FLAGS', '\\Seen')
+                print(f"  Done: {invoice_num} — {order.get('name','?')}")
+
+            except Exception as e:
+                print(f"  Error on email {eid}: {e}")
+
+        mail.logout()
+
+    except Exception as e:
+        print(f"  IMAP error: {e}")
+
+
+def polling_loop():
+    """Background thread — checks Gmail every 5 minutes."""
+    time.sleep(15)  # Let gunicorn finish starting
+    while True:
         try:
-            total_val = float(total_str.replace('$',''))
-        except:
-            total_val = 0
-        order['items'] = [{
-            'name': f"Order ({data.get('item_count','?')} items — see vessel info sheet)",
-            'price': total_val,
-            'qty': 1,
-            'color': 'See order',
-            'colorExtra': False,
-            'mounting': 'See order',
-            'textType': 'standard',
-        }]
+            check_gmail()
+        except Exception as e:
+            print(f"Poll error: {e}")
+        time.sleep(300)
 
-    # Generate invoice number and PDF
-    invoice_num = next_invoice_number()
-    order['invoice_num'] = invoice_num
-    pdf_path = f'/tmp/invoice_{invoice_num}.pdf'
-    generate_invoice(order, output_path=pdf_path)
 
-    # Email it
-    sent = send_invoice_email(order, pdf_path, invoice_num)
-
+# ── ROUTES ──
+@app.route('/health')
+def health():
     return jsonify({
         'status': 'ok',
-        'invoice': invoice_num,
-        'emailed': sent
-    }), 200
+        'service': 'HarborSPEC Order Server',
+        'smtp': bool(SMTP_USER and SMTP_PASS),
+    })
+
+@app.route('/check-now')
+def check_now():
+    """Manually trigger a check — test with /check-now?token=harbor2025"""
+    if WEBHOOK_TOKEN and request.args.get('token') != WEBHOOK_TOKEN:
+        return jsonify({'error': 'Unauthorized'}), 401
+    check_gmail()
+    return jsonify({'status': 'checked'})
 
 
-@app.route('/health', methods=['GET'])
-def health():
-    return jsonify({'status': 'ok', 'service': 'HarborSPEC Order Server'}), 200
-
+# Start polling thread (works with both direct run and gunicorn)
+_thread = threading.Thread(target=polling_loop, daemon=True)
+_thread.start()
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))

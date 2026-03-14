@@ -14,6 +14,7 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.mime.base import MIMEBase
 from email import encoders
+import json
 import os
 import re
 import threading
@@ -294,7 +295,65 @@ def health():
         'smtp': bool(SMTP_USER and SMTP_PASS),
     })
 
-@app.route('/check-now')
+@app.route('/order', methods=['POST'])
+def receive_order():
+    """Receive order directly from cart.html and generate invoice immediately."""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'error': 'No data'}), 400
+
+        # Parse items from JSON string
+        items = []
+        try:
+            raw_items = json.loads(data.get('items', '[]'))
+            for i in raw_items:
+                items.append({
+                    'name':       i.get('name', ''),
+                    'price':      float(i.get('price', 0)),
+                    'qty':        int(i.get('qty', 1)),
+                    'color':      i.get('color', ''),
+                    'colorExtra': i.get('colorExtra', False),
+                    'mounting':   i.get('mounting', ''),
+                    'textType':   i.get('textType', 'standard'),
+                })
+        except Exception as e:
+            print(f"  Item parse error: {e}")
+
+        if not items:
+            items = [{'name':'See order details','price':0,'qty':1,'color':'TBD','colorExtra':False,'mounting':'TBD','textType':'standard'}]
+
+        order = {
+            'name':    data.get('customer_name', data.get('name', '')),
+            'email':   data.get('customer_email', data.get('email', '')),
+            'phone':   data.get('phone', ''),
+            'company': data.get('company', ''),
+            'vessel':  data.get('vessel', ''),
+            'address': data.get('address', ''),
+            'city':    data.get('city', ''),
+            'state':   data.get('state', ''),
+            'zip':     data.get('zip', ''),
+            'county':  data.get('county', ''),
+            'notes':   data.get('notes', ''),
+            'items':   items,
+        }
+
+        invoice_num = next_invoice_number()
+        order['invoice_num'] = invoice_num
+        pdf_path = f'/tmp/invoice_{invoice_num}.pdf'
+
+        generate_invoice(order, output_path=pdf_path)
+        send_invoice_email(order, pdf_path, invoice_num)
+
+        print(f"  Direct order processed: {invoice_num} — {order.get('name','?')}")
+        return jsonify({'status': 'ok', 'invoice': invoice_num}), 200
+
+    except Exception as e:
+        print(f"  Order error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+
 def check_now():
     """Manually trigger a check — test with /check-now?token=harbor2025"""
     if WEBHOOK_TOKEN and request.args.get('token') != WEBHOOK_TOKEN:

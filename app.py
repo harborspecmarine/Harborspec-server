@@ -1,25 +1,23 @@
 """
 HarborSPEC™ Order Server
-Polls Gmail via IMAP every 5 minutes for Formspree order emails.
-Generates invoice PDF and emails it to orders inbox automatically.
-No OAuth required — uses Gmail App Password only.
+Receives orders directly from cart.html via POST.
+Also polls Gmail via IMAP every 5 minutes as fallback.
+Sends invoices via SendGrid API (HTTPS — no SMTP port issues).
 """
 
 from flask import Flask, request, jsonify
 from invoice import generate_invoice
-import smtplib
-import imaplib
-import email
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
-from email.mime.base import MIMEBase
-from email import encoders
 import json
 import os
 import re
 import threading
 import time
+import imaplib
+import email
+from email.header import decode_header
 from datetime import datetime
+import urllib.request
+import urllib.parse
 
 app = Flask(__name__)
 
@@ -34,12 +32,13 @@ def add_cors(response):
 def order_preflight():
     return '', 204
 
-ORDERS_EMAIL = os.environ.get('ORDERS_EMAIL', 'harborspecmarineorders@gmail.com')
-SMTP_USER    = os.environ.get('SMTP_USER',    '')
-SMTP_PASS    = os.environ.get('SMTP_PASS',    '')
-WEBHOOK_TOKEN = os.environ.get('WEBHOOK_TOKEN', '')
-
-COUNTER_FILE = '/tmp/hs_counter.txt'
+# ── CONFIG ──
+ORDERS_EMAIL     = os.environ.get('ORDERS_EMAIL',     'harborspecmarineorders@gmail.com')
+SMTP_USER        = os.environ.get('SMTP_USER',        '')
+SMTP_PASS        = os.environ.get('SMTP_PASS',        '')
+SENDGRID_API_KEY = os.environ.get('SENDGRID_API_KEY', '')
+WEBHOOK_TOKEN    = os.environ.get('WEBHOOK_TOKEN',    '')
+COUNTER_FILE     = '/tmp/hs_counter.txt'
 
 def next_invoice_number():
     try:
@@ -50,115 +49,71 @@ def next_invoice_number():
     return f'HS-{n:04d}'
 
 
-def parse_order_from_body(body):
-    """Parse a Formspree notification email body into an order dict."""
-    data = {}
-    for line in body.split('\n'):
-        line = line.strip()
-        if ':' in line:
-            key, _, val = line.partition(':')
-            data[key.strip().lower().replace(' ', '_')] = val.strip()
+# ── SENDGRID EMAIL ──
+def send_via_sendgrid(to_email, subject, body_text, pdf_path=None, invoice_num=None):
+    """Send email via SendGrid HTTPS API."""
+    if not SENDGRID_API_KEY:
+        print("  No SendGrid API key configured")
+        return False
 
-    order = {
-        'name':    data.get('name', ''),
-        'email':   data.get('email', data.get('_replyto', '')),
-        'phone':   data.get('phone', ''),
-        'vessel':  data.get('vessel', ''),
-        'address': data.get('address', ''),
-        'city':    data.get('city', ''),
-        'state':   data.get('state', ''),
-        'zip':     data.get('zip', ''),
-        'county':  data.get('county', ''),
-        'notes':   data.get('notes', ''),
-        'items':   [],
+    import base64
+
+    attachments = []
+    if pdf_path and invoice_num:
+        try:
+            with open(pdf_path, 'rb') as f:
+                pdf_data = base64.b64encode(f.read()).decode()
+            attachments = [{
+                'content': pdf_data,
+                'type': 'application/pdf',
+                'filename': f'invoice_{invoice_num}.pdf',
+                'disposition': 'attachment'
+            }]
+        except Exception as e:
+            print(f"  PDF attach error: {e}")
+
+    payload = {
+        'personalizations': [{'to': [{'email': to_email}]}],
+        'from': {'email': ORDERS_EMAIL, 'name': 'HarborSPEC'},
+        'reply_to': {'email': ORDERS_EMAIL},
+        'subject': subject,
+        'content': [{'type': 'text/plain', 'value': body_text}],
     }
+    if attachments:
+        payload['attachments'] = attachments
 
-    # Parse line items from ITEMS block in order_summary
-    if 'ITEMS' in body:
-        block = body[body.find('ITEMS') + 5:]
-        if 'CUSTOMER' in block:
-            block = block[:block.find('CUSTOMER')]
-        for line in block.split('\n'):
-            line = line.strip().lstrip('•').strip()
-            if not line:
-                continue
-            parts = [p.strip() for p in line.split('|')]
-            if len(parts) < 4:
-                continue
-            # Name + qty: "Pilot Card x1"
-            nq = parts[0]
-            qm = re.search(r'x(\d+)$', nq)
-            qty = int(qm.group(1)) if qm else 1
-            name = re.sub(r'\s*x\d+$', '', nq).strip()
-            # Color
-            cr = parts[1]
-            color_extra = '+$5' in cr
-            color = cr.replace('(+$5)', '').replace('+$5', '').strip()
-            mounting  = parts[2] if len(parts) > 2 else ''
-            text_type = parts[3] if len(parts) > 3 else 'standard'
-            # Price
-            pm = re.search(r'\$([\d.]+)', parts[-1]) if len(parts) > 4 else None
-            line_total = float(pm.group(1)) if pm else 0
-            unit_full  = (line_total / qty) if qty else 0
-            base_price = unit_full - (5 if color_extra else 0)
-
-            order['items'].append({
-                'name': name, 'price': base_price, 'qty': qty,
-                'color': color, 'colorExtra': color_extra,
-                'mounting': mounting, 'textType': text_type,
-            })
-
-    # Fallback if parsing failed
-    if not order['items']:
-        order['items'] = [{
-            'name': 'See order — vessel info sheet required',
-            'price': 0, 'qty': 1, 'color': 'TBD',
-            'colorExtra': False, 'mounting': 'TBD', 'textType': 'standard',
-        }]
-
-    return order
-
-
-def get_email_body(msg):
-    """Extract plain text body from email message."""
-    if msg.is_multipart():
-        for part in msg.walk():
-            if part.get_content_type() == 'text/plain':
-                return part.get_payload(decode=True).decode('utf-8', errors='ignore')
-    return msg.get_payload(decode=True).decode('utf-8', errors='ignore')
-
-
-def attach_pdf(msg, pdf_path, invoice_num):
-    """Attach invoice PDF to a MIMEMultipart message."""
+    data = json.dumps(payload).encode('utf-8')
+    req = urllib.request.Request(
+        'https://api.sendgrid.com/v3/mail/send',
+        data=data,
+        headers={
+            'Authorization': f'Bearer {SENDGRID_API_KEY}',
+            'Content-Type': 'application/json',
+        },
+        method='POST'
+    )
     try:
-        with open(pdf_path, 'rb') as f:
-            part = MIMEBase('application', 'octet-stream')
-            part.set_payload(f.read())
-            encoders.encode_base64(part)
-            part.add_header('Content-Disposition', f'attachment; filename="invoice_{invoice_num}.pdf"')
-            msg.attach(part)
+        with urllib.request.urlopen(req) as resp:
+            print(f"  SendGrid sent to {to_email}: {resp.status}")
+            return True
     except Exception as e:
-        print(f"  PDF attach error: {e}")
+        print(f"  SendGrid error: {e}")
+        return False
 
 
 def send_invoice_email(order, pdf_path, invoice_num):
-    """Send invoice PDF to orders inbox AND customer."""
-
+    """Send invoice to orders inbox and customer."""
     items_lines = '\n'.join(
         f"  • {i['name']} x{i['qty']} | {i['color']}{'(+$5)' if i.get('colorExtra') else ''} | {i['mounting']}"
         for i in order.get('items', [])
     )
 
-    # ── EMAIL TO YOU (internal copy) ──────────────────────────────
-    owner_msg = MIMEMultipart()
-    owner_msg['From']    = SMTP_USER
-    owner_msg['To']      = ORDERS_EMAIL
-    owner_msg['Subject'] = f"New Order — Invoice {invoice_num} — {order.get('name', '')}"
-
+    # Email to you
     owner_body = f"""New HarborSPEC order received.
 
 Invoice:  {invoice_num}
 Customer: {order.get('name','')}
+Company:  {order.get('company','N/A')}
 Email:    {order.get('email','')}
 Phone:    {order.get('phone','N/A')}
 Vessel:   {order.get('vessel','N/A')}
@@ -170,23 +125,19 @@ Items:
 
 Notes: {order.get('notes','None')}
 
-Invoice PDF attached. Customer has received their copy.
-Reply to this email to contact: {order.get('email','')}
+Invoice PDF attached. Reply to reach customer: {order.get('email','')}
 """
-    owner_msg.attach(MIMEText(owner_body, 'plain'))
-    attach_pdf(owner_msg, pdf_path, invoice_num)
+    send_via_sendgrid(
+        ORDERS_EMAIL,
+        f"New Order — Invoice {invoice_num} — {order.get('name','')}",
+        owner_body, pdf_path, invoice_num
+    )
 
-    # ── EMAIL TO CUSTOMER ─────────────────────────────────────────
+    # Email to customer
     customer_email = order.get('email', '').strip()
-    customer_msg = None
     if customer_email:
-        customer_msg = MIMEMultipart()
-        customer_msg['From']    = SMTP_USER
-        customer_msg['To']      = customer_email
-        customer_msg['Reply-To'] = ORDERS_EMAIL
-        customer_msg['Subject'] = f"Your HarborSPEC Order — Invoice {invoice_num}"
-
-        customer_body = f"""Thank you for your order, {order.get('name','').split()[0] if order.get('name') else 'Captain'}.
+        first_name = order.get('name','').split()[0] if order.get('name') else 'Captain'
+        customer_body = f"""Thank you for your order, {first_name}.
 
 Your order confirmation and invoice are attached. Please review and keep for your records.
 
@@ -215,106 +166,36 @@ QUESTIONS?
 Reply to this email or contact us at {ORDERS_EMAIL}
 
 Thank you for your business.
-HarborSPEC\u2122
+HarborSPEC™
 harborspecmarine.com
 """
-        customer_msg.attach(MIMEText(customer_body, 'plain'))
-        attach_pdf(customer_msg, pdf_path, invoice_num)
-
-    # ── SEND BOTH ─────────────────────────────────────────────────
-    try:
-        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
-            server.login(SMTP_USER, SMTP_PASS)
-            server.sendmail(SMTP_USER, ORDERS_EMAIL, owner_msg.as_string())
-            print(f"  Invoice {invoice_num} sent to {ORDERS_EMAIL}")
-            if customer_msg and customer_email:
-                server.sendmail(SMTP_USER, customer_email, customer_msg.as_string())
-                print(f"  Invoice {invoice_num} sent to customer: {customer_email}")
-        return True
-    except Exception as e:
-        print(f"  SMTP error: {e}")
-        return False
+        send_via_sendgrid(
+            customer_email,
+            f"Your HarborSPEC Order — Invoice {invoice_num}",
+            customer_body, pdf_path, invoice_num
+        )
 
 
-def check_gmail():
-    """Connect to Gmail via IMAP and process unread Formspree emails."""
-    if not SMTP_USER or not SMTP_PASS:
-        print("No credentials configured")
-        return
-
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] Checking Gmail...")
-    try:
-        mail = imaplib.IMAP4_SSL('imap.gmail.com')
-        mail.login(SMTP_USER, SMTP_PASS)
-        mail.select('inbox')
-
-        # Find unread emails from Formspree
-        _, msgs = mail.search(None, '(UNSEEN FROM "formspree")')
-        ids = msgs[0].split()
-
-        if not ids or ids == [b'']:
-            print(f"  No new orders")
-            mail.logout()
-            return
-
-        print(f"  {len(ids)} new order email(s) found")
-
-        for eid in ids:
-            try:
-                _, data = mail.fetch(eid, '(RFC822)')
-                msg = email.message_from_bytes(data[0][1])
-                body = get_email_body(msg)
-                order = parse_order_from_body(body)
-
-                invoice_num = next_invoice_number()
-                order['invoice_num'] = invoice_num
-                pdf_path = f'/tmp/invoice_{invoice_num}.pdf'
-
-                generate_invoice(order, output_path=pdf_path)
-                send_invoice_email(order, pdf_path, invoice_num)
-
-                # Mark as read so we don't process it again
-                mail.store(eid, '+FLAGS', '\\Seen')
-                print(f"  Done: {invoice_num} — {order.get('name','?')}")
-
-            except Exception as e:
-                print(f"  Error on email {eid}: {e}")
-
-        mail.logout()
-
-    except Exception as e:
-        print(f"  IMAP error: {e}")
+def process_order(order):
+    """Generate invoice and send emails for an order dict."""
+    invoice_num = next_invoice_number()
+    order['invoice_num'] = invoice_num
+    pdf_path = f'/tmp/invoice_{invoice_num}.pdf'
+    generate_invoice(order, output_path=pdf_path)
+    send_invoice_email(order, pdf_path, invoice_num)
+    print(f"  Processed: {invoice_num} — {order.get('name','?')}")
+    return invoice_num
 
 
-def polling_loop():
-    """Background thread — checks Gmail every 5 minutes."""
-    time.sleep(15)  # Let gunicorn finish starting
-    while True:
-        try:
-            check_gmail()
-        except Exception as e:
-            print(f"Poll error: {e}")
-        time.sleep(300)
-
-
-# ── ROUTES ──
-@app.route('/health')
-def health():
-    return jsonify({
-        'status': 'ok',
-        'service': 'HarborSPEC Order Server',
-        'smtp': bool(SMTP_USER and SMTP_PASS),
-    })
-
+# ── DIRECT ORDER ENDPOINT ──
 @app.route('/order', methods=['POST'])
 def receive_order():
-    """Receive order directly from cart.html and generate invoice immediately."""
+    """Receive order directly from cart.html."""
     try:
         data = request.get_json()
         if not data:
             return jsonify({'error': 'No data'}), 400
 
-        # Parse items from JSON string
         items = []
         try:
             raw_items = json.loads(data.get('items', '[]'))
@@ -349,14 +230,7 @@ def receive_order():
             'items':   items,
         }
 
-        invoice_num = next_invoice_number()
-        order['invoice_num'] = invoice_num
-        pdf_path = f'/tmp/invoice_{invoice_num}.pdf'
-
-        generate_invoice(order, output_path=pdf_path)
-        send_invoice_email(order, pdf_path, invoice_num)
-
-        print(f"  Direct order processed: {invoice_num} — {order.get('name','?')}")
+        invoice_num = process_order(order)
         return jsonify({'status': 'ok', 'invoice': invoice_num}), 200
 
     except Exception as e:
@@ -364,16 +238,125 @@ def receive_order():
         return jsonify({'error': str(e)}), 500
 
 
+# ── GMAIL POLLING (fallback) ──
+def parse_order_from_body(body):
+    data = {}
+    for line in body.split('\n'):
+        line = line.strip()
+        if ':' in line:
+            key, _, val = line.partition(':')
+            data[key.strip().lower().replace(' ', '_')] = val.strip()
+    order = {
+        'name':    data.get('name', ''),
+        'email':   data.get('email', data.get('_replyto', '')),
+        'phone':   data.get('phone', ''),
+        'vessel':  data.get('vessel', ''),
+        'address': data.get('address', ''),
+        'city':    data.get('city', ''),
+        'state':   data.get('state', ''),
+        'zip':     data.get('zip', ''),
+        'county':  data.get('county', ''),
+        'notes':   data.get('notes', ''),
+        'items':   [],
+    }
+    if 'ITEMS' in body:
+        block = body[body.find('ITEMS') + 5:]
+        if 'CUSTOMER' in block:
+            block = block[:block.find('CUSTOMER')]
+        for line in block.split('\n'):
+            line = line.strip().lstrip('•').strip()
+            if not line:
+                continue
+            parts = [p.strip() for p in line.split('|')]
+            if len(parts) < 4:
+                continue
+            nq = parts[0]
+            qm = re.search(r'x(\d+)$', nq)
+            qty = int(qm.group(1)) if qm else 1
+            name = re.sub(r'\s*x\d+$', '', nq).strip()
+            cr = parts[1]
+            color_extra = '+$5' in cr
+            color = cr.replace('(+$5)', '').replace('+$5', '').strip()
+            mounting  = parts[2] if len(parts) > 2 else ''
+            text_type = parts[3] if len(parts) > 3 else 'standard'
+            pm = re.search(r'\$([\d.]+)', parts[-1]) if len(parts) > 4 else None
+            line_total = float(pm.group(1)) if pm else 0
+            unit_full  = (line_total / qty) if qty else 0
+            base_price = unit_full - (5 if color_extra else 0)
+            order['items'].append({
+                'name': name, 'price': base_price, 'qty': qty,
+                'color': color, 'colorExtra': color_extra,
+                'mounting': mounting, 'textType': text_type,
+            })
+    if not order['items']:
+        order['items'] = [{'name':'See order','price':0,'qty':1,'color':'TBD','colorExtra':False,'mounting':'TBD','textType':'standard'}]
+    return order
 
+
+def check_gmail():
+    if not SMTP_USER or not SMTP_PASS:
+        return
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] Checking Gmail...")
+    try:
+        mail = imaplib.IMAP4_SSL('imap.gmail.com')
+        mail.login(SMTP_USER, SMTP_PASS)
+        mail.select('inbox')
+        _, msgs = mail.search(None, '(UNSEEN FROM "formspree")')
+        ids = msgs[0].split()
+        if not ids or ids == [b'']:
+            print(f"  No new orders")
+            mail.logout()
+            return
+        for eid in ids:
+            try:
+                _, data = mail.fetch(eid, '(RFC822)')
+                msg = email.message_from_bytes(data[0][1])
+                body = ''
+                if msg.is_multipart():
+                    for part in msg.walk():
+                        if part.get_content_type() == 'text/plain':
+                            body = part.get_payload(decode=True).decode('utf-8', errors='ignore')
+                            break
+                else:
+                    body = msg.get_payload(decode=True).decode('utf-8', errors='ignore')
+                order = parse_order_from_body(body)
+                process_order(order)
+                mail.store(eid, '+FLAGS', '\\Seen')
+            except Exception as e:
+                print(f"  Error: {e}")
+        mail.logout()
+    except Exception as e:
+        print(f"  IMAP error: {e}")
+
+
+def polling_loop():
+    time.sleep(15)
+    while True:
+        try:
+            check_gmail()
+        except Exception as e:
+            print(f"Poll error: {e}")
+        time.sleep(300)
+
+
+# ── ROUTES ──
+@app.route('/health')
+def health():
+    return jsonify({
+        'status': 'ok',
+        'service': 'HarborSPEC Order Server',
+        'sendgrid': bool(SENDGRID_API_KEY),
+        'smtp': bool(SMTP_USER and SMTP_PASS),
+    })
+
+@app.route('/check-now')
 def check_now():
-    """Manually trigger a check — test with /check-now?token=harbor2025"""
     if WEBHOOK_TOKEN and request.args.get('token') != WEBHOOK_TOKEN:
         return jsonify({'error': 'Unauthorized'}), 401
     check_gmail()
     return jsonify({'status': 'checked'})
 
 
-# Start polling thread (works with both direct run and gunicorn)
 _thread = threading.Thread(target=polling_loop, daemon=True)
 _thread.start()
 

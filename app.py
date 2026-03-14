@@ -6,6 +6,7 @@ No OAuth required — uses Gmail App Password only.
 """
 
 from flask import Flask, request, jsonify
+from flask_cors import CORS
 from invoice import generate_invoice
 import smtplib
 import imaplib
@@ -22,6 +23,7 @@ import time
 from datetime import datetime
 
 app = Flask(__name__)
+CORS(app)
 
 ORDERS_EMAIL = os.environ.get('ORDERS_EMAIL', 'harborspecmarineorders@gmail.com')
 SMTP_USER    = os.environ.get('SMTP_USER',    '')

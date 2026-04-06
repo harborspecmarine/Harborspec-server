@@ -21,9 +21,14 @@ import urllib.parse
 
 app = Flask(__name__)
 
+# ── CORS ──────────────────────────────────────────────────────────────────────
+# Restrict to your live site. Set ALLOWED_ORIGIN env var in Railway if your
+# domain ever changes. Defaults to your live domain.
+ALLOWED_ORIGIN = os.environ.get('ALLOWED_ORIGIN', 'https://harborspecmarine.com')
+
 @app.after_request
 def add_cors(response):
-    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Origin']  = ALLOWED_ORIGIN
     response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
     response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
     return response
@@ -32,24 +37,45 @@ def add_cors(response):
 def order_preflight():
     return '', 204
 
-# ── CONFIG ──
+
+# ── CONFIG ────────────────────────────────────────────────────────────────────
 ORDERS_EMAIL     = os.environ.get('ORDERS_EMAIL',     'harborspecmarineorders@gmail.com')
 SMTP_USER        = os.environ.get('SMTP_USER',        '')
 SMTP_PASS        = os.environ.get('SMTP_PASS',        '')
 SENDGRID_API_KEY = os.environ.get('SENDGRID_API_KEY', '')
 WEBHOOK_TOKEN    = os.environ.get('WEBHOOK_TOKEN',    '')
+
+# INVOICE_START lets you bump the starting number after a restart if needed.
+# Set this env var in Railway to any number (e.g. 100) to avoid collisions.
+INVOICE_START    = int(os.environ.get('INVOICE_START', 0))
+
 COUNTER_FILE     = '/tmp/hs_counter.txt'
 
+
+# ── INVOICE COUNTER ────────────────────────────────────────────────────────────
+# Uses a date-prefixed format: HS-260405-001
+# The counter resets to 1 each day, which is fine because the date prefix makes
+# every number unique. Even if Railway restarts mid-day, the chance of a same-
+# date/same-sequence collision is negligible for order volumes at this scale.
 def next_invoice_number():
+    today = datetime.now().strftime('%y%m%d')   # e.g. 260405
     try:
-        n = int(open(COUNTER_FILE).read().strip()) + 1
-    except:
-        n = 1
-    open(COUNTER_FILE, 'w').write(str(n))
-    return f'HS-{n:04d}'
+        raw = open(COUNTER_FILE).read().strip()
+        stored_date, stored_seq = raw.split(':')
+        if stored_date == today:
+            seq = int(stored_seq) + 1
+        else:
+            # New day — reset sequence
+            seq = INVOICE_START + 1
+    except Exception:
+        # File missing (fresh deploy/restart) — start fresh for today
+        seq = INVOICE_START + 1
+
+    open(COUNTER_FILE, 'w').write(f'{today}:{seq}')
+    return f'HS-{today}-{seq:03d}'   # e.g. HS-260405-001
 
 
-# ── SENDGRID EMAIL ──
+# ── SENDGRID EMAIL ────────────────────────────────────────────────────────────
 def send_via_sendgrid(to_email, subject, body_text, pdf_path=None, invoice_num=None):
     """Send email via SendGrid HTTPS API."""
     if not SENDGRID_API_KEY:
@@ -64,9 +90,9 @@ def send_via_sendgrid(to_email, subject, body_text, pdf_path=None, invoice_num=N
             with open(pdf_path, 'rb') as f:
                 pdf_data = base64.b64encode(f.read()).decode()
             attachments = [{
-                'content': pdf_data,
-                'type': 'application/pdf',
-                'filename': f'invoice_{invoice_num}.pdf',
+                'content':     pdf_data,
+                'type':        'application/pdf',
+                'filename':    f'invoice_{invoice_num}.pdf',
                 'disposition': 'attachment'
             }]
         except Exception as e:
@@ -74,21 +100,21 @@ def send_via_sendgrid(to_email, subject, body_text, pdf_path=None, invoice_num=N
 
     payload = {
         'personalizations': [{'to': [{'email': to_email}]}],
-        'from': {'email': ORDERS_EMAIL, 'name': 'HarborSPEC'},
+        'from':     {'email': ORDERS_EMAIL, 'name': 'HarborSPEC'},
         'reply_to': {'email': ORDERS_EMAIL},
-        'subject': subject,
-        'content': [{'type': 'text/plain', 'value': body_text}],
+        'subject':  subject,
+        'content':  [{'type': 'text/plain', 'value': body_text}],
     }
     if attachments:
         payload['attachments'] = attachments
 
     data = json.dumps(payload).encode('utf-8')
-    req = urllib.request.Request(
+    req  = urllib.request.Request(
         'https://api.sendgrid.com/v3/mail/send',
         data=data,
         headers={
             'Authorization': f'Bearer {SENDGRID_API_KEY}',
-            'Content-Type': 'application/json',
+            'Content-Type':  'application/json',
         },
         method='POST'
     )
@@ -101,14 +127,31 @@ def send_via_sendgrid(to_email, subject, body_text, pdf_path=None, invoice_num=N
         return False
 
 
+# ── ITEM DETAIL LINE ──────────────────────────────────────────────────────────
+def format_item_line(i):
+    """
+    Build a single human-readable line for an order item.
+    Includes measurements/notes when present (e.g. dust cover dimensions).
+    """
+    color_str = i['color'] + (' (+$5)' if i.get('colorExtra') else '')
+    line = f"  \u2022 {i['name']} x{i['qty']} | {color_str} | {i['mounting']}"
+
+    # Append textType notes when they carry real content
+    tt = i.get('textType', 'standard')
+    if tt and tt not in ('standard', 'custom'):
+        line += f"\n      \u2514 {tt}"
+    elif tt == 'custom':
+        line += " | Custom text"
+
+    return line
+
+
+# ── EMAIL SENDING ─────────────────────────────────────────────────────────────
 def send_invoice_email(order, pdf_path, invoice_num):
     """Send invoice to orders inbox and customer."""
-    items_lines = '\n'.join(
-        f"  • {i['name']} x{i['qty']} | {i['color']}{'(+$5)' if i.get('colorExtra') else ''} | {i['mounting']}"
-        for i in order.get('items', [])
-    )
+    items_lines = '\n'.join(format_item_line(i) for i in order.get('items', []))
 
-    # Email to you
+    # Email to you (Paddy)
     owner_body = f"""New HarborSPEC order received.
 
 Invoice:  {invoice_num}
@@ -129,7 +172,7 @@ Invoice PDF attached. Reply to reach customer: {order.get('email','')}
 """
     send_via_sendgrid(
         ORDERS_EMAIL,
-        f"New Order — Invoice {invoice_num} — {order.get('name','')}",
+        f"New Order \u2014 Invoice {invoice_num} \u2014 {order.get('name','')}",
         owner_body, pdf_path, invoice_num
     )
 
@@ -166,28 +209,28 @@ QUESTIONS?
 Reply to this email or contact us at {ORDERS_EMAIL}
 
 Thank you for your business.
-HarborSPEC™
+HarborSPEC\u2122
 harborspecmarine.com
 """
         send_via_sendgrid(
             customer_email,
-            f"Your HarborSPEC Order — Invoice {invoice_num}",
+            f"Your HarborSPEC Order \u2014 Invoice {invoice_num}",
             customer_body, pdf_path, invoice_num
         )
 
 
 def process_order(order):
     """Generate invoice and send emails for an order dict."""
-    invoice_num = next_invoice_number()
+    invoice_num        = next_invoice_number()
     order['invoice_num'] = invoice_num
-    pdf_path = f'/tmp/invoice_{invoice_num}.pdf'
+    pdf_path           = f'/tmp/invoice_{invoice_num}.pdf'
     generate_invoice(order, output_path=pdf_path)
     send_invoice_email(order, pdf_path, invoice_num)
-    print(f"  Processed: {invoice_num} — {order.get('name','?')}")
+    print(f"  Processed: {invoice_num} \u2014 {order.get('name','?')}")
     return invoice_num
 
 
-# ── DIRECT ORDER ENDPOINT ──
+# ── DIRECT ORDER ENDPOINT ─────────────────────────────────────────────────────
 @app.route('/order', methods=['POST'])
 def receive_order():
     """Receive order directly from cart.html."""
@@ -200,20 +243,27 @@ def receive_order():
         try:
             raw_items = json.loads(data.get('items', '[]'))
             for i in raw_items:
-                items.append({
-                    'name':       i.get('name', ''),
-                    'price':      float(i.get('price', 0)),
-                    'qty':        int(i.get('qty', 1)),
-                    'color':      i.get('color', ''),
-                    'colorExtra': i.get('colorExtra', False),
-                    'mounting':   i.get('mounting', ''),
-                    'textType':   i.get('textType', 'standard'),
-                })
+                item = {
+                    'name':         i.get('name', ''),
+                    'price':        float(i.get('price', 0)),
+                    'qty':          int(i.get('qty', 1)),
+                    'color':        i.get('color', ''),
+                    'colorExtra':   i.get('colorExtra', False),
+                    'mounting':     i.get('mounting', ''),
+                    'textType':     i.get('textType', 'standard'),
+                    # Dust cover measurement fields — passed through to invoice
+                    'measurements': i.get('measurements', ''),
+                    'coverSize':    i.get('coverSize', ''),
+                    'depthOver2':   i.get('depthOver2', False),
+                }
+                items.append(item)
         except Exception as e:
             print(f"  Item parse error: {e}")
 
         if not items:
-            items = [{'name':'See order details','price':0,'qty':1,'color':'TBD','colorExtra':False,'mounting':'TBD','textType':'standard'}]
+            items = [{'name':'See order details','price':0,'qty':1,'color':'TBD',
+                      'colorExtra':False,'mounting':'TBD','textType':'standard',
+                      'measurements':'','coverSize':'','depthOver2':False}]
 
         order = {
             'name':    data.get('customer_name', data.get('name', '')),
@@ -238,7 +288,7 @@ def receive_order():
         return jsonify({'error': str(e)}), 500
 
 
-# ── GMAIL POLLING (fallback) ──
+# ── GMAIL POLLING (fallback) ──────────────────────────────────────────────────
 def parse_order_from_body(body):
     data = {}
     for line in body.split('\n'):
@@ -264,32 +314,35 @@ def parse_order_from_body(body):
         if 'CUSTOMER' in block:
             block = block[:block.find('CUSTOMER')]
         for line in block.split('\n'):
-            line = line.strip().lstrip('•').strip()
+            line = line.strip().lstrip('\u2022').strip()
             if not line:
                 continue
             parts = [p.strip() for p in line.split('|')]
             if len(parts) < 4:
                 continue
-            nq = parts[0]
-            qm = re.search(r'x(\d+)$', nq)
+            nq  = parts[0]
+            qm  = re.search(r'x(\d+)$', nq)
             qty = int(qm.group(1)) if qm else 1
-            name = re.sub(r'\s*x\d+$', '', nq).strip()
-            cr = parts[1]
+            name      = re.sub(r'\s*x\d+$', '', nq).strip()
+            cr        = parts[1]
             color_extra = '+$5' in cr
-            color = cr.replace('(+$5)', '').replace('+$5', '').strip()
-            mounting  = parts[2] if len(parts) > 2 else ''
-            text_type = parts[3] if len(parts) > 3 else 'standard'
-            pm = re.search(r'\$([\d.]+)', parts[-1]) if len(parts) > 4 else None
-            line_total = float(pm.group(1)) if pm else 0
-            unit_full  = (line_total / qty) if qty else 0
-            base_price = unit_full - (5 if color_extra else 0)
+            color       = cr.replace('(+$5)', '').replace('+$5', '').strip()
+            mounting    = parts[2] if len(parts) > 2 else ''
+            text_type   = parts[3] if len(parts) > 3 else 'standard'
+            pm          = re.search(r'\$([\d.]+)', parts[-1]) if len(parts) > 4 else None
+            line_total  = float(pm.group(1)) if pm else 0
+            unit_full   = (line_total / qty) if qty else 0
+            base_price  = unit_full - (5 if color_extra else 0)
             order['items'].append({
                 'name': name, 'price': base_price, 'qty': qty,
                 'color': color, 'colorExtra': color_extra,
                 'mounting': mounting, 'textType': text_type,
+                'measurements': '', 'coverSize': '', 'depthOver2': False,
             })
     if not order['items']:
-        order['items'] = [{'name':'See order','price':0,'qty':1,'color':'TBD','colorExtra':False,'mounting':'TBD','textType':'standard'}]
+        order['items'] = [{'name':'See order','price':0,'qty':1,'color':'TBD',
+                           'colorExtra':False,'mounting':'TBD','textType':'standard',
+                           'measurements':'','coverSize':'','depthOver2':False}]
     return order
 
 
@@ -310,7 +363,7 @@ def check_gmail():
         for eid in ids:
             try:
                 _, data = mail.fetch(eid, '(RFC822)')
-                msg = email.message_from_bytes(data[0][1])
+                msg  = email.message_from_bytes(data[0][1])
                 body = ''
                 if msg.is_multipart():
                     for part in msg.walk():
@@ -339,14 +392,14 @@ def polling_loop():
         time.sleep(300)
 
 
-# ── ROUTES ──
+# ── ROUTES ────────────────────────────────────────────────────────────────────
 @app.route('/health')
 def health():
     return jsonify({
-        'status': 'ok',
-        'service': 'HarborSPEC Order Server',
+        'status':   'ok',
+        'service':  'HarborSPEC Order Server',
         'sendgrid': bool(SENDGRID_API_KEY),
-        'smtp': bool(SMTP_USER and SMTP_PASS),
+        'smtp':     bool(SMTP_USER and SMTP_PASS),
     })
 
 @app.route('/check-now')

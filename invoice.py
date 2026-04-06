@@ -2,7 +2,7 @@
 """
 HarborSPEC™ Invoice Generator
 Generates a branded PDF invoice from order data.
-Usage: python3 generate_invoice.py  (uses sample data)
+Usage: python3 invoice.py  (uses sample data)
 Or: import and call generate_invoice(order) from your own code.
 """
 
@@ -25,6 +25,7 @@ LIGHT     = HexColor('#d4e3ef')
 CHARCOAL  = HexColor('#1a2f45')
 
 PAGE_W, PAGE_H = letter  # 612 x 792 pt
+
 
 def draw_header(c, invoice_num, date_str, due_str):
     """Draw the branded header band."""
@@ -82,7 +83,7 @@ def draw_addresses(c, order):
 
     c.setFillColor(LIGHT)
     c.setFont('Helvetica-Bold', 9)
-    c.drawString(0.5*inch, y, 'HarborSPEC™')
+    c.drawString(0.5*inch, y, 'HarborSPEC\u2122')
     y -= 0.17*inch
 
     c.setFillColor(FOG)
@@ -128,18 +129,25 @@ def draw_addresses(c, order):
             y -= 0.16*inch
 
 
+def item_has_notes(item):
+    """Return True if this item has production notes beyond standard/custom."""
+    tt = item.get('textType', 'standard')
+    return tt and tt not in ('standard', 'custom')
+
+
 def draw_items_table(c, items, start_y):
     """Draw the line items table. Returns y position after table."""
     col_x = {
-        'item':   0.5*inch,
-        'color':  3.2*inch,
-        'mount':  4.1*inch,
-        'qty':    5.0*inch,
-        'unit':   5.4*inch,
-        'total':  6.1*inch,
+        'item':  0.5*inch,
+        'color': 3.2*inch,
+        'mount': 4.1*inch,
+        'qty':   5.0*inch,
+        'unit':  5.4*inch,
+        'total': 6.1*inch,
     }
-    row_h = 0.28*inch
-    y = start_y
+    row_h      = 0.28*inch
+    notes_h    = 0.20*inch   # extra height for production notes sub-line
+    y          = start_y
 
     # Header row background
     c.setFillColor(STEEL)
@@ -158,8 +166,6 @@ def draw_items_table(c, items, start_y):
     ]
     for key, label in headers:
         if key in ('qty', 'unit', 'total'):
-            # right-align numbers
-            x = col_x[key] + (0.55*inch if key != 'total' else 0.5*inch)
             c.drawCentredString(col_x[key] + 0.2*inch, y - row_h + 10, label)
         else:
             c.drawString(col_x[key], y - row_h + 10, label)
@@ -167,21 +173,35 @@ def draw_items_table(c, items, start_y):
 
     # Item rows
     for i, item in enumerate(items):
+        has_notes  = item_has_notes(item)
+        this_row_h = row_h + (notes_h if has_notes else 0)
+
         row_bg = HexColor('#0f2336') if i % 2 == 0 else HexColor('#0d1b2a')
         c.setFillColor(row_bg)
-        c.rect(0.4*inch, y - row_h + 4, PAGE_W - 0.8*inch, row_h, fill=1, stroke=0)
+        c.rect(0.4*inch, y - this_row_h + 4, PAGE_W - 0.8*inch, this_row_h, fill=1, stroke=0)
 
         unit_price = item['price'] + (5 if item.get('colorExtra') else 0)
         line_total = unit_price * item['qty']
-        text_note = ' (Custom)' if item.get('textType') == 'custom' else ''
+
+        # Item name — append (Custom) badge if applicable
+        tt        = item.get('textType', 'standard')
+        name_note = ' \u2014 Custom Text' if tt == 'custom' else ''
 
         c.setFillColor(WHITE)
         c.setFont('Helvetica-Bold', 8.5)
-        c.drawString(col_x['item'], y - row_h + 10, item['name'] + text_note)
+        c.drawString(col_x['item'], y - row_h + 10, item['name'] + name_note)
+
+        # Production notes sub-line (e.g. dust cover measurements)
+        if has_notes:
+            c.setFillColor(BRASS_LT)
+            c.setFont('Helvetica', 7.5)
+            # Truncate to fit column width — max ~65 chars before color col
+            notes_str = str(tt)[:90]
+            c.drawString(col_x['item'] + 6, y - row_h - 4, notes_str)
 
         c.setFillColor(LIGHT)
         c.setFont('Helvetica', 8)
-        color_str = item.get('color','') + ('+$5' if item.get('colorExtra') else '')
+        color_str = item.get('color','') + (' +$5' if item.get('colorExtra') else '')
         c.drawString(col_x['color'], y - row_h + 10, color_str)
         c.drawString(col_x['mount'], y - row_h + 10, item.get('mounting','')[:16])
         c.drawCentredString(col_x['qty'] + 0.2*inch, y - row_h + 10, str(item['qty']))
@@ -193,7 +213,7 @@ def draw_items_table(c, items, start_y):
         c.setFont('Helvetica-Bold', 8.5)
         c.drawRightString(col_x['total'] + 0.45*inch, y - row_h + 10, f'${line_total:.2f}')
 
-        y -= row_h
+        y -= this_row_h
 
     # Bottom border
     c.setStrokeColor(STEEL)
@@ -222,10 +242,10 @@ def draw_totals(c, subtotal, shipping, tax_rate, tax_amount, total, county, y):
     total_row('Shipping', 'FREE' if shipping == 0 else f'${shipping:.2f}')
     if tax_rate > 0:
         county_display = county.title() if county else 'NY'
-        total_row(f'NY Sales Tax — {county_display} County', '')
+        total_row(f'NY Sales Tax \u2014 {county_display} County', '')
         total_row(f'  Rate: {tax_rate*100:.3f}%', f'${tax_amount:.2f}')
     else:
-        total_row('Sales Tax', 'N/A — Outside NY')
+        total_row('Sales Tax', 'N/A \u2014 Outside NY')
 
     # Divider
     y -= 0.05*inch
@@ -269,7 +289,7 @@ def draw_footer(c, invoice_num, notes=''):
     # Invoice number at very bottom
     c.setFillColor(STEEL)
     c.setFont('Helvetica', 7)
-    c.drawCentredString(PAGE_W / 2, 0.6*inch, f'HarborSPEC™  |  Invoice {invoice_num}  |  harborspecmarine.com')
+    c.drawCentredString(PAGE_W / 2, 0.6*inch, f'HarborSPEC\u2122  |  Invoice {invoice_num}  |  harborspecmarine.com')
 
 
 def generate_invoice(order, output_path=None):
@@ -277,34 +297,36 @@ def generate_invoice(order, output_path=None):
     Generate a HarborSPEC invoice PDF.
 
     order = {
-        'invoice_num': 'HS-0001',          # auto-generated if not provided
-        'name': 'John Smith',
-        'email': 'john@example.com',
-        'phone': '555-000-0000',           # optional
-        'vessel': 'MV Some Vessel',        # optional
+        'invoice_num': 'HS-260405-001',    # auto-generated if not provided
+        'name':    'John Smith',
+        'email':   'john@example.com',
+        'phone':   '555-000-0000',         # optional
+        'vessel':  'MV Some Vessel',       # optional
         'address': '123 Harbor Drive',
-        'city': 'Bay Shore',
-        'state': 'NY',
-        'zip': '11706',
-        'county': 'Suffolk',               # for NY tax
-        'notes': '',                       # optional
+        'city':    'Bay Shore',
+        'state':   'NY',
+        'zip':     '11706',
+        'county':  'Suffolk',              # for NY tax
+        'notes':   '',                     # optional
         'items': [
             {
-                'name': 'Pilot Card',
-                'price': 60,
-                'qty': 1,
-                'color': 'Black',
-                'colorExtra': False,
-                'mounting': '2-Screw Holes',
-                'textType': 'standard',
+                'name':         'Pilot Card',
+                'price':        60,
+                'qty':          1,
+                'color':        'Black',
+                'colorExtra':   False,
+                'mounting':     '2-Screw Holes',
+                'textType':     'standard',
+                # Dust cover specific (optional):
+                'measurements': '7.5" L x 2.5" W x 1.5" D',
+                'coverSize':    'Medium',
+                'depthOver2':   False,
             },
-            ...
         ]
     }
     """
-    # Auto invoice number from timestamp if not supplied
     if not order.get('invoice_num'):
-        order['invoice_num'] = 'HS-' + datetime.now().strftime('%Y%m%d%H%M')
+        order['invoice_num'] = 'HS-' + datetime.now().strftime('%y%m%d-%H%M')
 
     inv_num  = order['invoice_num']
     today    = datetime.now()
@@ -313,15 +335,15 @@ def generate_invoice(order, output_path=None):
     due_str  = due_date.strftime('%B %d, %Y')
 
     if not output_path:
-        safe_name = inv_num.replace('/', '-')
-        output_path = f'/mnt/user-data/outputs/invoice_{safe_name}.pdf'
+        safe_name   = inv_num.replace('/', '-')
+        output_path = f'/tmp/invoice_{safe_name}.pdf'
 
     # ── CALCULATE TOTALS ──
     items    = order.get('items', [])
     subtotal = sum((it['price'] + (5 if it.get('colorExtra') else 0)) * it['qty'] for it in items)
     shipping = 0 if subtotal >= 100 else 9.95
 
-    # NY tax
+    # NY tax by county
     NY_TAX = {
         'albany':0.08,'allegany':0.085,'bronx':0.08875,'broome':0.08,'cattaraugus':0.08,
         'cayuga':0.08,'chautauqua':0.08,'chemung':0.08,'chenango':0.08,'clinton':0.08,
@@ -336,11 +358,11 @@ def generate_invoice(order, output_path=None):
         'seneca':0.08,'st. lawrence':0.08,'steuben':0.08,'suffolk':0.08625,
         'sullivan':0.08,'tioga':0.08,'tompkins':0.08,'ulster':0.08,'warren':0.08,
         'washington':0.08,'wayne':0.08,'westchester':0.08375,'wyoming':0.08,'yates':0.08,
-        'brooklyn':0.08875, 'staten island':0.08875,
+        'brooklyn':0.08875,'staten island':0.08875,
     }
-    state  = order.get('state','').strip().upper()
-    county = order.get('county','').strip().lower()
-    county = county.replace(' county','').replace(' (brooklyn)','').replace(' (manhattan)','').replace(' (staten island)','')
+    state   = order.get('state','').strip().upper()
+    county  = order.get('county','').strip().lower()
+    county  = county.replace(' county','').replace(' (brooklyn)','').replace(' (manhattan)','').replace(' (staten island)','')
     tax_rate = NY_TAX.get(county, 0) if state == 'NY' else 0
     tax_amt  = subtotal * tax_rate
     total    = subtotal + shipping + tax_amt
@@ -376,4 +398,3 @@ def generate_invoice(order, output_path=None):
     print(f'  Customer:  {order.get("name","")}')
     print(f'  Total:     ${total:.2f}')
     return output_path
-

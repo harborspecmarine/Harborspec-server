@@ -90,7 +90,7 @@ def draw_addresses(c, order):
     c.setFont('Helvetica', 8.5)
     from_lines = [
         'Suffolk County, New York',
-        'harborspecmarineorders@gmail.com',
+        'orders@harborspecmarine.com',
         'harborspecmarine.com',
     ]
     for line in from_lines:
@@ -277,7 +277,7 @@ def draw_footer(c, invoice_num, notes=''):
     payment_lines = [
         'Payment is due upon receipt of invoice. A payment link will be sent separately.',
         'Lead time is approximately 2 weeks from receipt of your completed vessel info sheet.',
-        'Questions? Email harborspecmarineorders@gmail.com',
+        'Questions? Email orders@harborspecmarine.com',
     ]
     if notes:
         payment_lines.insert(0, f'Order Notes: {notes}')

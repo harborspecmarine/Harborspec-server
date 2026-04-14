@@ -562,8 +562,26 @@ def polling_loop():
 
 
 # ── ROUTES ────────────────────────────────────────────────────────────────────
-@app.route('/health')
-def health():
+@app.route('/debug-sa', methods=['GET'])
+def debug_sa():
+    """Temporary debug endpoint — shows what SA params would be generated."""
+    if not WEBHOOK_TOKEN or request.args.get('token') != WEBHOOK_TOKEN:
+        return jsonify({'error': 'Unauthorized'}), 401
+    test_order = {
+        'name': 'Test User', 'email': 'test@test.com',
+        'address': '123 Test St', 'city': 'Bay Shore',
+        'state': 'NY', 'zip': '11706', 'county': 'Suffolk'
+    }
+    fields = build_sa_params(test_order, 'HS-TEST-001', 60.00)
+    return jsonify({
+        'endpoint':   SA_ENDPOINT,
+        'profile_id': SA_PROFILE_ID,
+        'access_key': SA_ACCESS_KEY[:8] + '...' if SA_ACCESS_KEY else 'MISSING',
+        'secret_key': 'SET' if SA_SECRET_KEY else 'MISSING',
+        'signed_field_names': fields.get('signed_field_names'),
+        'signature_length': len(fields.get('signature', '')),
+        'test_mode': SA_TEST_MODE,
+    })
     return jsonify({
         'status':   'ok',
         'service':  'HarborSPEC Order Server',

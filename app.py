@@ -14,6 +14,9 @@ import threading
 import time
 import imaplib
 import email
+import hmac
+import hashlib
+import uuid
 from email.header import decode_header
 from datetime import datetime
 import urllib.request
@@ -39,7 +42,7 @@ def order_preflight():
 
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
-ORDERS_EMAIL     = os.environ.get('ORDERS_EMAIL',     'harborspecmarineorders@gmail.com')
+ORDERS_EMAIL     = os.environ.get('ORDERS_EMAIL',     'orders@harborspecmarine.com')
 SMTP_USER        = os.environ.get('SMTP_USER',        '')
 SMTP_PASS        = os.environ.get('SMTP_PASS',        '')
 SENDGRID_API_KEY = os.environ.get('SENDGRID_API_KEY', '')
@@ -50,6 +53,16 @@ WEBHOOK_TOKEN    = os.environ.get('WEBHOOK_TOKEN',    '')
 INVOICE_START    = int(os.environ.get('INVOICE_START', 0))
 
 COUNTER_FILE     = '/tmp/hs_counter.txt'
+
+# ── CYBERSOURCE SECURE ACCEPTANCE ──────────────────────────────────────────────
+SA_PROFILE_ID = os.environ.get('SA_PROFILE_ID', '')
+SA_ACCESS_KEY = os.environ.get('SA_ACCESS_KEY', '')
+SA_SECRET_KEY = os.environ.get('SA_SECRET_KEY', '')
+# Set SA_TEST_MODE=false in Railway env vars when ready to go live
+SA_TEST_MODE  = os.environ.get('SA_TEST_MODE', 'true').lower() != 'false'
+SA_ENDPOINT   = ('https://testsecureacceptance.cybersource.com/pay'
+                 if SA_TEST_MODE else
+                 'https://secureacceptance.cybersource.com/pay')
 
 
 # ── INVOICE COUNTER ────────────────────────────────────────────────────────────
@@ -219,6 +232,56 @@ harborspecmarine.com
         )
 
 
+def sign_sa_request(fields):
+    """Generate HMAC-SHA256 signature for CyberSource Secure Acceptance."""
+    signed_field_names = fields.get('signed_field_names', '')
+    values = ','.join(f'{f}={fields.get(f, "")}' for f in signed_field_names.split(','))
+    mac = hmac.new(SA_SECRET_KEY.encode('utf-8'), values.encode('utf-8'), hashlib.sha256)
+    return mac.hexdigest()
+
+
+def build_sa_params(order, invoice_num, amount):
+    """Build signed CyberSource Secure Acceptance form fields."""
+    now = datetime.utcnow().strftime('%Y-%m-%dT%H:%M:%SZ')
+    ref = invoice_num  # use invoice number as reference
+
+    fields = {
+        'access_key':          SA_ACCESS_KEY,
+        'profile_id':          SA_PROFILE_ID,
+        'transaction_uuid':    str(uuid.uuid4()),
+        'signed_date_time':    now,
+        'locale':              'en-us',
+        'transaction_type':    'sale',
+        'reference_number':    ref,
+        'amount':              str(amount),
+        'currency':            'USD',
+        'payment_method':      'card',
+        'bill_to_forename':    order.get('name','').split()[0] if order.get('name') else '',
+        'bill_to_surname':     ' '.join(order.get('name','').split()[1:]) if len(order.get('name','').split()) > 1 else order.get('name',''),
+        'bill_to_email':       order.get('email', ''),
+        'bill_to_address_line1': order.get('address', ''),
+        'bill_to_address_city':  order.get('city', ''),
+        'bill_to_address_state': order.get('state', ''),
+        'bill_to_address_country': 'US',
+        'bill_to_address_postal_code': order.get('zip', ''),
+        'unsigned_field_names': '',
+    }
+
+    # Fields to sign — order matters
+    signed = [
+        'access_key','profile_id','transaction_uuid','signed_field_names',
+        'unsigned_field_names','signed_date_time','locale','transaction_type',
+        'reference_number','amount','currency','payment_method',
+        'bill_to_forename','bill_to_surname','bill_to_email',
+        'bill_to_address_line1','bill_to_address_city','bill_to_address_state',
+        'bill_to_address_country','bill_to_address_postal_code',
+    ]
+    fields['signed_field_names'] = ','.join(signed)
+    fields['signature'] = sign_sa_request(fields)
+
+    return fields
+
+
 def process_order(order):
     """Generate invoice and send emails for an order dict."""
     invoice_num        = next_invoice_number()
@@ -251,7 +314,6 @@ def receive_order():
                     'colorExtra':   i.get('colorExtra', False),
                     'mounting':     i.get('mounting', ''),
                     'textType':     i.get('textType', 'standard'),
-                    # Dust cover measurement fields — passed through to invoice
                     'measurements': i.get('measurements', ''),
                     'coverSize':    i.get('coverSize', ''),
                     'depthOver2':   i.get('depthOver2', False),
@@ -281,10 +343,117 @@ def receive_order():
         }
 
         invoice_num = process_order(order)
-        return jsonify({'status': 'ok', 'invoice': invoice_num}), 200
+
+        # Build CyberSource Secure Acceptance signed params if configured
+        sa_params = None
+        if SA_PROFILE_ID and SA_ACCESS_KEY and SA_SECRET_KEY:
+            try:
+                amount = float(data.get('amount', 0))
+                if amount <= 0:
+                    # Recalculate from items if not provided
+                    amount = sum((i['price'] + (5 if i.get('colorExtra') else 0)) * i['qty'] for i in items)
+                sa_fields = build_sa_params(order, invoice_num, round(amount, 2))
+                sa_params = {
+                    'endpoint': SA_ENDPOINT,
+                    'fields':   sa_fields
+                }
+            except Exception as e:
+                print(f"  SA params error: {e}")
+
+        response = {'status': 'ok', 'invoice': invoice_num}
+        if sa_params:
+            response['sa_params'] = sa_params
+
+        return jsonify(response), 200
 
     except Exception as e:
         print(f"  Order error: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+# ── PAYMENT COMPLETE (CyberSource notification) ───────────────────────────────
+@app.route('/payment-complete', methods=['POST', 'GET'])
+def payment_complete():
+    """
+    Receives POST notification from CyberSource after payment is processed.
+    Logs the result and sends a payment confirmation email.
+    """
+    try:
+        if request.method == 'POST':
+            data = request.form.to_dict()
+        else:
+            data = request.args.to_dict()
+
+        decision       = data.get('decision', 'UNKNOWN')
+        reason_code    = data.get('reason_code', '')
+        invoice_num    = data.get('reference_number', 'N/A')
+        amount         = data.get('auth_amount', data.get('amount', 'N/A'))
+        card_last4     = data.get('req_card_number', '')[-4:] if data.get('req_card_number') else 'XXXX'
+        customer_email = data.get('req_bill_to_email', '')
+        customer_name  = data.get('req_bill_to_forename', '') + ' ' + data.get('req_bill_to_surname', '')
+
+        print(f"  Payment notification: {decision} | {invoice_num} | ${amount} | {customer_email}")
+
+        if decision == 'ACCEPT':
+            # Send payment confirmed email to owner
+            body = f"""Payment received for HarborSPEC order.
+
+Invoice:   {invoice_num}
+Customer:  {customer_name.strip()}
+Email:     {customer_email}
+Amount:    ${amount}
+Card:      ending {card_last4}
+Decision:  {decision}
+Reason:    {reason_code}
+
+Order is confirmed. Begin production.
+"""
+            send_via_sendgrid(
+                ORDERS_EMAIL,
+                f'Payment Confirmed \u2014 {invoice_num} \u2014 ${amount}',
+                body
+            )
+
+            # Notify customer payment was received
+            if customer_email:
+                customer_body = f"""Hi {customer_name.strip().split()[0] if customer_name.strip() else 'Captain'},
+
+Your payment of ${amount} has been received for HarborSPEC order {invoice_num}.
+
+Production will begin shortly. Standard lead time is 2 weeks from payment.
+
+Thank you for your business.
+HarborSPEC\u2122
+harborspecmarine.com
+"""
+                send_via_sendgrid(
+                    customer_email,
+                    f'Payment Received \u2014 HarborSPEC Order {invoice_num}',
+                    customer_body
+                )
+
+        elif decision in ('DECLINE', 'ERROR', 'REVIEW'):
+            body = f"""Payment {decision} for HarborSPEC order.
+
+Invoice:  {invoice_num}
+Customer: {customer_name.strip()}
+Email:    {customer_email}
+Amount:   ${amount}
+Decision: {decision}
+Reason:   {reason_code}
+
+Follow up with customer if needed.
+"""
+            send_via_sendgrid(
+                ORDERS_EMAIL,
+                f'Payment {decision} \u2014 {invoice_num}',
+                body
+            )
+
+        return jsonify({'status': 'received', 'decision': decision}), 200
+
+    except Exception as e:
+        print(f"  Payment complete error: {e}")
         return jsonify({'error': str(e)}), 500
 
 
@@ -400,6 +569,8 @@ def health():
         'service':  'HarborSPEC Order Server',
         'sendgrid': bool(SENDGRID_API_KEY),
         'smtp':     bool(SMTP_USER and SMTP_PASS),
+        'payments': bool(SA_PROFILE_ID and SA_ACCESS_KEY and SA_SECRET_KEY),
+        'test_mode': SA_TEST_MODE,
     })
 
 @app.route('/check-now')

@@ -25,19 +25,27 @@ import urllib.parse
 app = Flask(__name__)
 
 # ── CORS ──────────────────────────────────────────────────────────────────────
-# Restrict to your live site. Set ALLOWED_ORIGIN env var in Railway if your
-# domain ever changes. Defaults to your live domain.
 ALLOWED_ORIGIN = os.environ.get('ALLOWED_ORIGIN', 'https://harborspecmarine.com')
 
 @app.after_request
 def add_cors(response):
-    response.headers['Access-Control-Allow-Origin']  = ALLOWED_ORIGIN
+    origin = request.headers.get('Origin', '')
+    # Allow harborspecmarine.com for cart POSTs
+    # Allow CyberSource domains for payment notification POSTs
+    if origin == ALLOWED_ORIGIN or 'cybersource.com' in origin:
+        response.headers['Access-Control-Allow-Origin']  = origin
+    else:
+        response.headers['Access-Control-Allow-Origin']  = ALLOWED_ORIGIN
     response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
     response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
     return response
 
 @app.route('/order', methods=['OPTIONS'])
 def order_preflight():
+    return '', 204
+
+@app.route('/payment-complete', methods=['OPTIONS'])
+def payment_complete_preflight():
     return '', 204
 
 

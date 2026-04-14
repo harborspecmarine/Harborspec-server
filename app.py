@@ -233,11 +233,17 @@ harborspecmarine.com
 
 
 def sign_sa_request(fields):
-    """Generate HMAC-SHA256 signature for CyberSource Secure Acceptance."""
+    """Generate HMAC-SHA256 signature for CyberSource Secure Acceptance.
+    CyberSource requires Base64-encoded HMAC-SHA256, not hex."""
+    import base64
     signed_field_names = fields.get('signed_field_names', '')
     values = ','.join(f'{f}={fields.get(f, "")}' for f in signed_field_names.split(','))
-    mac = hmac.new(SA_SECRET_KEY.encode('utf-8'), values.encode('utf-8'), hashlib.sha256)
-    return mac.hexdigest()
+    mac = hmac.new(
+        SA_SECRET_KEY.encode('utf-8'),
+        values.encode('utf-8'),
+        hashlib.sha256
+    )
+    return base64.b64encode(mac.digest()).decode('utf-8')
 
 
 def build_sa_params(order, invoice_num, amount):

@@ -626,14 +626,18 @@ def debug_sa():
     }
     fields = build_sa_params(test_order, 'HS-TEST-001', 60.00)
     return jsonify({
-        'endpoint':   SA_ENDPOINT,
-        'profile_id': SA_PROFILE_ID,
-        'access_key': SA_ACCESS_KEY[:8] + '...' if SA_ACCESS_KEY else 'MISSING',
-        'secret_key': 'SET' if SA_SECRET_KEY else 'MISSING',
+        'endpoint':           SA_ENDPOINT,
+        'profile_id':         SA_PROFILE_ID,
+        'access_key':         SA_ACCESS_KEY[:8] + '...' if SA_ACCESS_KEY else 'MISSING',
+        'secret_key':         'SET' if SA_SECRET_KEY else 'MISSING',
         'signed_field_names': fields.get('signed_field_names'),
-        'signature_length': len(fields.get('signature', '')),
-        'test_mode': SA_TEST_MODE,
+        'signature_length':   len(fields.get('signature', '')),
+        'test_mode':          SA_TEST_MODE,
     })
+
+
+@app.route('/health')
+def health():
     return jsonify({
         'status':   'ok',
         'service':  'HarborSPEC Order Server',

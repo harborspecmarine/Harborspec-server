@@ -249,32 +249,103 @@ def sheet_loss_of_steering(c, acro, item, invoice_num, order_date):
     draw_header(c, invoice_num, 'Loss of Steering', order_date)
     y = PAGE_H - 1.65*inch
     y = draw_instructions(c, y,
-        'Standard emergency procedures will be used unless you specify custom content below.')
+        'Select the preset that best matches your vessel, or choose Custom and enter your own text.')
     y = draw_section_title(c, y, 'VESSEL INFO')
     y = draw_field(c, acro, y, 'Vessel Name', 'vessel_name')
-    y -= 0.1*inch
-    y = draw_section_title(c, y, 'TEXT PREFERENCE')
-    for label, val in [('Use standard loss of steering procedures', 'standard'),
-                       ('Use custom text (enter below)', 'custom')]:
-        c.setFillColor(HexColor('#f9f9f9'))
-        c.setStrokeColor(HexColor('#cccccc'))
-        c.rect(0.5*inch, y - 0.18*inch, 0.18*inch, 0.18*inch, fill=1, stroke=1)
-        acro.checkbox(name=f'choice_{val}', tooltip=label,
-                      x=0.5*inch, y=y - 0.18*inch, size=0.18*inch,
-                      checked=(val == 'standard'),
-                      borderColor=HexColor('#cccccc'), fillColor=None)
-        c.setFillColor(HexColor('#111111'))
-        c.setFont('Helvetica', 8.5)
-        c.drawString(0.5*inch + 0.25*inch, y - 0.13*inch, label)
-        y -= 0.28*inch
-    y -= 0.05*inch
-    y = draw_section_title(c, y, 'CUSTOM TEXT (if applicable)')
-    y = draw_field(c, acro, y, 'Enter your custom loss of steering procedures',
-                   'custom_text', height=2.0*inch, multiline=True)
-    y -= 0.1*inch
-    y = draw_section_title(c, y, 'STEERING SYSTEM DETAILS (optional)')
-    y = draw_field(c, acro, y, 'Describe your steering system (e.g. hydraulic ram, tiller arm, etc.)',
-                   'steering_system', height=0.6*inch, multiline=True)
+    y -= 0.12*inch
+    y = draw_section_title(c, y, 'SELECT LOSS OF STEERING PROCEDURE')
+
+    # Option text — shown in preview boxes inside each card
+    opt1_lines = [
+        'IF ON AUTO PILOT, PUSH STBY AND SWITCH',
+        'SELECTOR TO NFU. IF ABOVE FAILS OR ON NFU,',
+        'SWITCH STEERING PUMPS.',
+        'TOTAL LOSS: NOTIFY CREW / SOUND GENERAL ALARM /',
+        'IF NEEDED, OPERATE FROM ENGINE ROOM.',
+        'IF MOVING A MANNED BARGE, NOTIFY CREW AND',
+        'HAVE THEM READY TO DROP ANCHOR.',
+        'NOTIFY ALL TRAFFIC IN THE AREA AND DISPLAY',
+        'PROPER LIGHTS OR DAY SHAPES.',
+        'CAPTAIN AND ENGINEER MUST BE ADVISED.',
+    ]
+    opt2_lines = [
+        'SOUND GENERAL ALARM',
+        '1  SWITCH TO AUXILIARY STEERING PUMP',
+        '2  ALERT THE MASTER AND ENGINEER',
+        '3  TAKE WAY OFF THE TOW',
+        '4  NOTE IN LOGS — POSITION, SET AND DRIFT',
+        '5  ALERT ALL VESSELS IN VICINITY',
+        '6  CONTACT VTS AND USCG',
+        '7  DISPLAY PROPER LIGHTS OR DAY SHAPES',
+    ]
+
+    cell_w = PAGE_W - inch
+    cell_h = 1.72*inch
+    gap    = 0.12*inch
+
+    def draw_preset_card(cx, cy, name, title, lines, checked=False):
+        # Card
+        c.setFillColor(HexColor('#f0f4f8'))
+        c.setStrokeColor(HexColor('#c0cfd8'))
+        c.setLineWidth(0.75)
+        c.roundRect(cx, cy - cell_h, cell_w, cell_h, 5, fill=1, stroke=1)
+        # Checkbox
+        cb_size = 0.17*inch
+        acro.checkbox(name=name, tooltip=title,
+                      x=cx + 0.12*inch, y=cy - 0.28*inch,
+                      size=cb_size, checked=checked,
+                      borderColor=HexColor('#aaaaaa'), fillColor=HexColor('#ffffff'))
+        # Title
+        c.setFillColor(NAVY)
+        c.setFont('Helvetica-Bold', 8.5)
+        c.drawString(cx + 0.12*inch + cb_size + 0.08*inch, cy - 0.22*inch, title)
+        # Divider
+        c.setStrokeColor(HexColor('#c0cfd8'))
+        c.setLineWidth(0.5)
+        c.line(cx + 0.12*inch, cy - 0.33*inch, cx + cell_w - 0.12*inch, cy - 0.33*inch)
+        # Preview text
+        c.setFillColor(HexColor('#333333'))
+        c.setFont('Helvetica', 6.8)
+        for li, line in enumerate(lines):
+            if cy - 0.44*inch - li * 0.115*inch < cy - cell_h + 0.1*inch:
+                break
+            c.drawString(cx + 0.15*inch, cy - 0.44*inch - li * 0.115*inch, line)
+
+    draw_preset_card(0.5*inch, y, 'opt_autopilot',
+                     'OPTION 1 — AUTOPILOT / NFU VESSEL', opt1_lines)
+    y -= cell_h + gap
+
+    draw_preset_card(0.5*inch, y, 'opt_numbered',
+                     'OPTION 2 — NUMBERED STEPS (TUG/TOW)', opt2_lines)
+    y -= cell_h + gap
+
+    # Custom card — half width pair
+    half_w = (cell_w - gap) / 2
+    small_h = 0.55*inch
+
+    # Custom checkbox card
+    c.setFillColor(HexColor('#f0f4f8'))
+    c.setStrokeColor(HexColor('#c0cfd8'))
+    c.setLineWidth(0.75)
+    c.roundRect(0.5*inch, y - small_h, half_w, small_h, 5, fill=1, stroke=1)
+    cb_size = 0.17*inch
+    acro.checkbox(name='opt_custom', tooltip='Custom text',
+                  x=0.5*inch + 0.12*inch, y=y - 0.28*inch,
+                  size=cb_size, checked=False,
+                  borderColor=HexColor('#aaaaaa'), fillColor=HexColor('#ffffff'))
+    c.setFillColor(NAVY)
+    c.setFont('Helvetica-Bold', 8.5)
+    c.drawString(0.5*inch + 0.12*inch + cb_size + 0.08*inch, y - 0.22*inch, 'CUSTOM')
+    c.setFillColor(HexColor('#555555'))
+    c.setFont('Helvetica', 7.5)
+    c.drawString(0.5*inch + 0.15*inch, y - 0.40*inch, 'None of the above — enter below.')
+
+    y -= small_h + gap
+
+    y = draw_section_title(c, y, 'CUSTOM TEXT (required if Custom selected above)')
+    y = draw_field(c, acro, y,
+                   'Enter your complete loss of steering procedure exactly as you want it to appear',
+                   'custom_text', height=1.0*inch, multiline=True)
     draw_footer(c, invoice_num, 1, 1)
 
 
@@ -282,31 +353,63 @@ def sheet_bnwas(c, acro, item, invoice_num, order_date):
     draw_header(c, invoice_num, 'BNWAS Panel', order_date)
     y = PAGE_H - 1.65*inch
     y = draw_instructions(c, y,
-        'Standard BNWAS text will be used unless you need custom content.')
+        'Check the option that matches your vessel, or select Custom and enter your own text.')
     y = draw_section_title(c, y, 'VESSEL INFO')
     y = draw_field(c, acro, y, 'Vessel Name', 'vessel_name')
-    y -= 0.1*inch
-    y = draw_section_title(c, y, 'TEXT PREFERENCE')
-    for label, val in [('Use standard BNWAS panel text', 'standard'),
-                       ('Use custom text (enter below)', 'custom')]:
-        c.setFillColor(HexColor('#f9f9f9'))
-        c.setStrokeColor(HexColor('#cccccc'))
-        c.rect(0.5*inch, y - 0.18*inch, 0.18*inch, 0.18*inch, fill=1, stroke=1)
-        acro.checkbox(name=f'choice_{val}', tooltip=label,
-                      x=0.5*inch, y=y - 0.18*inch, size=0.18*inch,
-                      checked=(val == 'standard'),
-                      borderColor=HexColor('#cccccc'), fillColor=None)
-        c.setFillColor(HexColor('#111111'))
-        c.setFont('Helvetica', 8.5)
-        c.drawString(0.5*inch + 0.25*inch, y - 0.13*inch, label)
-        y -= 0.28*inch
-    y -= 0.05*inch
-    y = draw_section_title(c, y, 'CUSTOM TEXT (if applicable)')
-    y = draw_field(c, acro, y, 'Enter custom BNWAS panel text',
-                   'custom_text', height=1.5*inch, multiline=True)
+    y -= 0.12*inch
+    y = draw_section_title(c, y, 'SELECT ACTIVATION TYPE')
+
+    options = [
+        ('opt_manual',   'MANUAL ACTIVATION',
+         ['System must be turned on manually', 'prior to getting underway.']),
+        ('opt_engines',  'AUTO — ENGINES IN GEAR',
+         ['Do not power off — system will activate', 'automatically while engines are in gear.']),
+        ('opt_steering', 'AUTO — STEERING PUMP',
+         ['Do not power off — system will activate', 'automatically while steering pump is running.']),
+        ('opt_custom',   'CUSTOM',
+         ['None of the above apply — enter your', 'vessel’s specific procedure below.']),
+    ]
+
+    cell_w  = (PAGE_W - inch - 0.15*inch) / 2
+    cell_h  = 1.05*inch
+    gap     = 0.15*inch
+    start_y = y
+
+    for i, (name, title, body_lines) in enumerate(options):
+        col = i % 2
+        row = i // 2
+        cx  = 0.5*inch + col * (cell_w + gap)
+        cy  = start_y - row * (cell_h + gap)
+
+        c.setFillColor(HexColor('#f0f4f8'))
+        c.setStrokeColor(HexColor('#c0cfd8'))
+        c.setLineWidth(0.75)
+        c.roundRect(cx, cy - cell_h, cell_w, cell_h, 5, fill=1, stroke=1)
+
+        cb_size = 0.17*inch
+        cb_x = cx + 0.12*inch
+        cb_y = cy - 0.28*inch
+        acro.checkbox(name=name, tooltip=title,
+                      x=cb_x, y=cb_y, size=cb_size, checked=False,
+                      borderColor=HexColor('#aaaaaa'), fillColor=HexColor('#ffffff'))
+
+        c.setFillColor(NAVY)
+        c.setFont('Helvetica-Bold', 8.5)
+        c.drawString(cb_x + cb_size + 0.1*inch, cb_y + 0.03*inch, title)
+
+        c.setFillColor(HexColor('#333333'))
+        c.setFont('Helvetica', 7.5)
+        for li, line in enumerate(body_lines):
+            c.drawString(cx + 0.12*inch, cy - 0.52*inch - li * 0.17*inch, line)
+
+    y = start_y - 2 * (cell_h + gap) - 0.15*inch
+
+    y = draw_section_title(c, y, 'CUSTOM TEXT (required if Custom selected above)')
+    y = draw_field(c, acro, y, 'Enter your custom BNWAS panel text exactly as you want it to appear',
+                   'custom_text', height=1.1*inch, multiline=True)
     y -= 0.1*inch
     y = draw_section_title(c, y, 'NOTES')
-    y = draw_field(c, acro, y, 'Additional requests', 'notes', height=0.6*inch, multiline=True)
+    y = draw_field(c, acro, y, 'Additional requests', 'notes', height=0.5*inch, multiline=True)
     draw_footer(c, invoice_num, 1, 1)
 
 
@@ -314,56 +417,76 @@ def sheet_tow_wire(c, acro, item, invoice_num, order_date):
     draw_header(c, invoice_num, 'Tow Wire / Capacities', order_date)
     y = PAGE_H - 1.65*inch
     y = draw_instructions(c, y,
-        'Provide either wire layer/length data OR vessel capacity data — whichever applies to your vessel.')
+        'Use the Wire Length Calculator at harborspecmarine.com/wire-calculator.html to get your values, then fill in below.')
     y = draw_section_title(c, y, 'VESSEL INFO')
     y = draw_field(c, acro, y, 'Vessel Name', 'vessel_name')
     y -= 0.1*inch
     y = draw_section_title(c, y, 'WIRE LENGTH TABLE (center to center on drum)')
-    c.setFillColor(HexColor('#111111'))
-    c.setFont('Helvetica', 8)
-    c.drawString(0.5*inch, y, 'Fill in layer/length pairs as applicable:')
-    y -= 0.22*inch
-    pairs = [('0.5', '1'), ('1.5', '2'), ('2.5', '3'), ('3.5', '4'),
-             ('4.5', '5'), ('5.5', '6'), ('6.5', '7'), ('7.5', '8')]
-    col_w = (PAGE_W - inch) / 4
+
+    # 16 rows, split into 2 columns of 8 (each column = Layer | Length)
+    # 4 printed columns: Layer | Length (ft) | Layer | Length (ft)
+    ROWS = 16
+    col_w  = (PAGE_W - inch) / 4   # width of each of the 4 columns
+    row_h  = 0.215*inch
+
+    # Column headers
     headers = ['Layer', 'Length (ft)', 'Layer', 'Length (ft)']
     for i, h in enumerate(headers):
         c.setFont('Helvetica-Bold', 7.5)
         c.setFillColor(NAVY)
         c.drawString(0.5*inch + i * col_w + 4, y, h)
     y -= 0.18*inch
-    for row in range(4):
-        for col in range(2):
-            idx = row + col * 4
-            if idx >= len(pairs): break
-            layer_lbl, len_lbl = pairs[idx]
-            bx = 0.5*inch + col * 2 * col_w
-            # Layer (pre-filled label)
-            c.setFillColor(HexColor('#eef2f5'))
-            c.setStrokeColor(HexColor('#cccccc'))
-            c.rect(bx, y - 0.22*inch, col_w - 4, 0.22*inch, fill=1, stroke=1)
-            c.setFillColor(HexColor('#555'))
-            c.setFont('Helvetica', 8)
-            c.drawCentredString(bx + (col_w - 4)/2, y - 0.15*inch, layer_lbl)
-            # Length field
+
+    for row in range(ROWS // 2):          # 8 rows printed per side
+        for col_pair in range(2):         # left half (rows 1-8) and right half (rows 9-16)
+            row_num  = row + col_pair * (ROWS // 2) + 1   # 1-based row label
+            base_x   = 0.5*inch + col_pair * 2 * col_w
+
+            # Layer field (blank)
             c.setFillColor(HexColor('#f9f9f9'))
-            c.rect(bx + col_w, y - 0.22*inch, col_w - 4, 0.22*inch, fill=1, stroke=1)
-            acro.textfield(name=f'wire_len_{layer_lbl.replace(".", "_")}',
-                           tooltip=f'Layer {layer_lbl} length',
-                           x=bx + col_w + 2, y=y - 0.20*inch,
-                           width=col_w - 8, height=0.18*inch,
+            c.setStrokeColor(HexColor('#cccccc'))
+            c.setLineWidth(0.5)
+            c.rect(base_x, y - row_h, col_w - 4, row_h, fill=1, stroke=1)
+            acro.textfield(name=f'layer_{row_num}',
+                           tooltip=f'Row {row_num} layer',
+                           x=base_x + 2, y=y - row_h + 2,
+                           width=col_w - 8, height=row_h - 4,
                            fontName='Helvetica', fontSize=8,
                            borderColor=None, fillColor=None,
                            textColor=HexColor('#111'), forceBorder=False)
-        y -= 0.28*inch
 
-    y -= 0.1*inch
-    y = draw_section_title(c, y, 'OR — VESSEL CAPACITIES')
-    y = draw_two_fields(c, acro, y, 'Fuel (gal)', 'cap_fuel', 'Water (gal)', 'cap_water')
-    y = draw_two_fields(c, acro, y, 'Lube Oil (gal)', 'cap_lube', 'Other', 'cap_other')
-    y -= 0.1*inch
+            # Length field (blank)
+            lx = base_x + col_w
+            c.setFillColor(HexColor('#f9f9f9'))
+            c.rect(lx, y - row_h, col_w - 4, row_h, fill=1, stroke=1)
+            acro.textfield(name=f'length_{row_num}',
+                           tooltip=f'Row {row_num} length (ft)',
+                           x=lx + 2, y=y - row_h + 2,
+                           width=col_w - 8, height=row_h - 4,
+                           fontName='Helvetica', fontSize=8,
+                           borderColor=None, fillColor=None,
+                           textColor=HexColor('#111'), forceBorder=False)
+
+        y -= row_h + 2
+
+    y -= 0.15*inch
     y = draw_section_title(c, y, 'NOTES')
-    y = draw_field(c, acro, y, 'Additional details', 'notes', height=0.5*inch, multiline=True)
+    y = draw_field(c, acro, y,
+                   'Additional details, wire size, or drum specs. Questions? Email orders@harborspecmarine.com',
+                   'notes', height=0.45*inch, multiline=True)
+
+    # Calculator callout box
+    c.setFillColor(HexColor('#eaf2f8'))
+    c.setStrokeColor(HexColor('#b0cde0'))
+    c.setLineWidth(0.75)
+    box_y = y - 0.55*inch
+    c.roundRect(0.5*inch, box_y, PAGE_W - inch, 0.45*inch, 4, fill=1, stroke=1)
+    c.setFillColor(NAVY)
+    c.setFont('Helvetica-Bold', 8)
+    c.drawString(0.65*inch, box_y + 0.28*inch, 'ℹ  Wire Length Calculator:')
+    c.setFont('Helvetica', 8)
+    c.drawString(0.65*inch, box_y + 0.13*inch,
+        'harborspecmarine.com/wire-calculator.html  —  or email orders@harborspecmarine.com for help')
     draw_footer(c, invoice_num, 1, 1)
 
 

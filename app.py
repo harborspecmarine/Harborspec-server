@@ -7,6 +7,7 @@ Sends invoices via SendGrid API (HTTPS — no SMTP port issues).
 
 from flask import Flask, request, jsonify
 from invoice import generate_invoice
+from infosheet import generate_all_info_sheets
 import json
 import os
 import re
@@ -97,8 +98,8 @@ def next_invoice_number():
 
 
 # ── SENDGRID EMAIL ────────────────────────────────────────────────────────────
-def send_via_sendgrid(to_email, subject, body_text, pdf_path=None, invoice_num=None):
-    """Send email via SendGrid HTTPS API."""
+def send_via_sendgrid(to_email, subject, body_text, pdf_path=None, invoice_num=None, extra_attachments=None):
+    """Send email via SendGrid HTTPS API. extra_attachments = list of (filename, path) tuples."""
     if not SENDGRID_API_KEY:
         print("  No SendGrid API key configured")
         return False
@@ -118,6 +119,21 @@ def send_via_sendgrid(to_email, subject, body_text, pdf_path=None, invoice_num=N
             }]
         except Exception as e:
             print(f"  PDF attach error: {e}")
+
+    # Attach any extra PDFs (info sheets)
+    if extra_attachments:
+        for fname, fpath in extra_attachments:
+            try:
+                with open(fpath, 'rb') as f:
+                    data = base64.b64encode(f.read()).decode()
+                attachments.append({
+                    'content':     data,
+                    'type':        'application/pdf',
+                    'filename':    fname,
+                    'disposition': 'attachment'
+                })
+            except Exception as e:
+                print(f"  Extra attach error ({fname}): {e}")
 
     payload = {
         'personalizations': [{'to': [{'email': to_email}]}],
@@ -168,11 +184,11 @@ def format_item_line(i):
 
 
 # ── EMAIL SENDING ─────────────────────────────────────────────────────────────
-def send_invoice_email(order, pdf_path, invoice_num):
-    """Send invoice to orders inbox and customer."""
+def send_invoice_email(order, pdf_path, invoice_num, info_sheets=None):
+    """Send invoice to orders inbox and customer. info_sheets = [(name, path), ...]"""
     items_lines = '\n'.join(format_item_line(i) for i in order.get('items', []))
 
-    # Email to you (Paddy)
+    # Email to you (Paddy) — invoice only, no info sheets needed
     owner_body = f"""New HarborSPEC order received.
 
 Invoice:  {invoice_num}
@@ -197,13 +213,22 @@ Invoice PDF attached. Reply to reach customer: {order.get('email','')}
         owner_body, pdf_path, invoice_num
     )
 
-    # Email to customer
+    # Email to customer — invoice + all info sheets attached
     customer_email = order.get('email', '').strip()
     if customer_email:
         first_name = order.get('name','').split()[0] if order.get('name') else 'Captain'
+        n_sheets   = len(info_sheets) if info_sheets else 0
+        sheet_note = (
+            f'\n\nVESSEL INFO SHEETS\n'
+            f'{n_sheets} info sheet(s) are attached — one for each product. '
+            f'Fill out each PDF digitally or print and complete by hand, '
+            f'then email back to {ORDERS_EMAIL}. '
+            f'Production begins once we receive your completed sheets.'
+        ) if n_sheets else ''
+
         customer_body = f"""Thank you for your order, {first_name}.
 
-Your order confirmation and invoice are attached. Please review and keep for your records.
+Your invoice and vessel info sheets are attached. The invoice is your record of purchase. Please complete the info sheet(s) and email them back so we can begin production.
 
 INVOICE:  {invoice_num}
 VESSEL:   {order.get('vessel','N/A')}
@@ -217,13 +242,7 @@ SHIP TO:
 {('County: ' + order['county']) if order.get('county') else ''}
 
 NOTES: {order.get('notes','None')}
-
----
-PAYMENT
-We will be in touch shortly to process payment. You can also reply to this email or call us at any time to provide payment.
-
-Payment is due within 7 days. Production begins after payment is received.
-Standard lead time is 2 weeks from payment. Rush orders (+25%) available on request.
+{sheet_note}
 
 ---
 QUESTIONS?
@@ -233,10 +252,18 @@ Thank you for your business.
 HarborSPEC\u2122
 harborspecmarine.com
 """
+        # Build extra attachments list for info sheets
+        extra = []
+        if info_sheets:
+            for sheet_name, sheet_path in info_sheets:
+                safe = sheet_name.replace(' ', '_').replace('/', '-')[:40]
+                extra.append((f'InfoSheet_{safe}.pdf', sheet_path))
+
         send_via_sendgrid(
             customer_email,
             f"Your HarborSPEC Order \u2014 Invoice {invoice_num}",
-            customer_body, pdf_path, invoice_num
+            customer_body, pdf_path, invoice_num,
+            extra_attachments=extra if extra else None
         )
 
 
@@ -297,13 +324,22 @@ def build_sa_params(order, invoice_num, amount):
 
 
 def process_order(order):
-    """Generate invoice and send emails for an order dict."""
-    invoice_num        = next_invoice_number()
+    """Generate invoice, info sheets, and send emails for an order dict."""
+    invoice_num          = next_invoice_number()
     order['invoice_num'] = invoice_num
-    pdf_path           = f'/tmp/invoice_{invoice_num}.pdf'
+    pdf_path             = f'/tmp/invoice_{invoice_num}.pdf'
+
     generate_invoice(order, output_path=pdf_path)
-    send_invoice_email(order, pdf_path, invoice_num)
-    print(f"  Processed: {invoice_num} \u2014 {order.get('name','?')}")
+
+    # Generate one info sheet per line item
+    try:
+        info_sheets = generate_all_info_sheets(order, invoice_num, output_dir='/tmp')
+    except Exception as e:
+        print(f"  Info sheet generation error: {e}")
+        info_sheets = []
+
+    send_invoice_email(order, pdf_path, invoice_num, info_sheets=info_sheets)
+    print(f"  Processed: {invoice_num} \u2014 {order.get('name','?')} \u2014 {len(info_sheets)} info sheet(s)")
     return invoice_num
 
 
@@ -400,13 +436,15 @@ def payment_complete():
 
         decision       = data.get('decision', 'UNKNOWN')
         reason_code    = data.get('reason_code', '')
-        invoice_num    = data.get('reference_number', 'N/A')
-        amount         = data.get('auth_amount', data.get('amount', 'N/A'))
+        # CyberSource prefixes request fields with req_ in the notification
+        invoice_num    = data.get('req_reference_number', data.get('reference_number', 'N/A'))
+        amount         = data.get('auth_amount', data.get('req_amount', data.get('amount', 'N/A')))
         card_last4     = data.get('req_card_number', '')[-4:] if data.get('req_card_number') else 'XXXX'
-        customer_email = data.get('req_bill_to_email', '')
-        customer_name  = data.get('req_bill_to_forename', '') + ' ' + data.get('req_bill_to_surname', '')
+        customer_email = data.get('req_bill_to_email', data.get('bill_to_email', ''))
+        customer_name  = (data.get('req_bill_to_forename', '') + ' ' + data.get('req_bill_to_surname', '')).strip()
 
         print(f"  Payment notification: {decision} | {invoice_num} | ${amount} | {customer_email}")
+        print(f"  All fields: {list(data.keys())}")
 
         if decision == 'ACCEPT':
             # Send payment confirmed email to owner

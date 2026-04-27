@@ -40,6 +40,12 @@ def detect_product_type(item_name):
     if 'multi-switch' in n or 'switch panel' in n: return 'multi_switch'
     if 'gang' in n or 'outlet' in n or 'plate' in n or 'cover' in n:
         return 'wall_plate'
+    if any(x in n for x in ['general alarm', 'muster station', 'life jacket',
+                              'watertight', 'off watch', 'crew sleeping',
+                              'smoking area', 'visitor sign']):
+        return 'safety_fixed'
+    if 'emergency contact' in n:                   return 'emergency_contacts'
+    if 'standing order' in n:                      return 'standing_orders'
     return 'generic'
 
 
@@ -643,6 +649,66 @@ def sheet_generic(c, acro, item, invoice_num, order_date):
     draw_footer(c, invoice_num, 1, 1)
 
 
+def sheet_emergency_contacts(c, acro, item, invoice_num, order_date):
+    draw_header(c, invoice_num, 'Emergency Contacts', order_date)
+    y = PAGE_H - 1.65*inch
+    y = draw_instructions(c, y,
+        'Provide the contact numbers for your vessel. We will engrave them permanently into the plaque.')
+    y = draw_section_title(c, y, 'VESSEL INFO')
+    y = draw_field(c, acro, y, 'Vessel Name', 'vessel_name')
+    y -= 0.1*inch
+    y = draw_section_title(c, y, 'CONTACT NUMBERS')
+    y = draw_field(c, acro, y, 'USCG Sector (name and number)', 'uscg_sector')
+    y = draw_field(c, acro, y, 'VTS (Vessel Traffic Service)', 'vts')
+    y = draw_field(c, acro, y, 'Designated Person Ashore (name and number)', 'dpa')
+    y = draw_field(c, acro, y, 'Port Captain (name and number)', 'port_captain')
+    y = draw_field(c, acro, y, '24 Hour Dispatch', 'dispatch')
+    y -= 0.1*inch
+    y = draw_section_title(c, y, 'NOTES (optional)')
+    y = draw_field(c, acro, y, 'Additional contacts or special instructions',
+                   'notes', height=0.6*inch, multiline=True)
+    draw_footer(c, invoice_num, 1, 1)
+
+
+def sheet_standing_orders(c, acro, item, invoice_num, order_date):
+    draw_header(c, invoice_num, "Master's Standing Orders", order_date)
+    y = PAGE_H - 1.65*inch
+    y = draw_instructions(c, y,
+        'Enter your standing orders exactly as you want them to appear. We will format and lay out the plaque.')
+    y = draw_section_title(c, y, 'VESSEL INFO')
+    y = draw_field(c, acro, y, 'Vessel Name', 'vessel_name')
+    y -= 0.05*inch
+    y = draw_section_title(c, y, 'STANDING ORDERS TEXT')
+    c.setFillColor(HexColor('#f0f4f8'))
+    c.setStrokeColor(HexColor('#b0cde0'))
+    c.setLineWidth(0.5)
+    ref_h = 1.55*inch
+    ref_y = y - ref_h
+    c.roundRect(0.5*inch, ref_y, PAGE_W - inch, ref_h, 4, fill=1, stroke=1)
+    c.setFillColor(HexColor('#2e4a62'))
+    c.setFont('Helvetica-Bold', 7.5)
+    c.drawString(0.65*inch, y - 0.18*inch, 'STANDARD FORMAT (for reference):')
+    std_lines = [
+        'NOTIFY CAPTAIN IMMEDIATELY IN THE FOLLOWING SITUATIONS:',
+        '1. Restricted visibility is encountered or expected',
+        '2. Traffic conditions or other vessels cause concern',
+        '3. Difficulty maintaining course or speed',
+        '4. Heavy weather or possibility of damage',
+        '5. Problem with engines, steering or nav equipment',
+        '6. Vessel meets any hazard to navigation',
+        '7. Unexpected change in orders affecting voyage plan',
+        '8. Any emergency or situation of doubt',
+    ]
+    c.setFont('Helvetica', 6.8)
+    for li, line in enumerate(std_lines):
+        c.drawString(0.65*inch, y - 0.33*inch - li * 0.125*inch, line)
+    y = ref_y - 0.15*inch
+    y = draw_field(c, acro, y,
+                   'Enter your complete standing orders (or confirm standard format above)',
+                   'orders_text', height=1.8*inch, multiline=True)
+    draw_footer(c, invoice_num, 1, 1)
+
+
 # ── Sheet dispatcher ───────────────────────────────────────────────────────────
 SHEET_BUILDERS = {
     'pilot_card':           sheet_pilot_card,
@@ -656,6 +722,8 @@ SHEET_BUILDERS = {
     'multi_switch':         sheet_multi_switch,
     'dust_cover':           sheet_dust_cover,
     'generic':              sheet_generic,
+    'emergency_contacts':   sheet_emergency_contacts,
+    'standing_orders':      sheet_standing_orders,
 }
 
 
@@ -694,6 +762,9 @@ def generate_all_info_sheets(order, invoice_num, output_dir='/tmp'):
     items  = order.get('items', [])
 
     for idx, item in enumerate(items):
+        # Skip fixed-text safety placards — no customer input needed
+        if detect_product_type(item.get('name', '')) == 'safety_fixed':
+            continue
         safe_name = item.get('name', f'item_{idx}').replace(' ', '_').replace('/', '-')[:40]
         filename  = f'infosheet_{invoice_num}_{idx+1}_{safe_name}.pdf'
         path      = os.path.join(output_dir, filename)

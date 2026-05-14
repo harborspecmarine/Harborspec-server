@@ -42,7 +42,9 @@ def detect_product_type(item_name):
         return 'wall_plate'
     if any(x in n for x in ['general alarm', 'muster station', 'life jacket',
                               'watertight', 'off watch', 'crew sleeping',
-                              'smoking area', 'visitor sign']):
+                              'smoking area', 'visitor sign',
+                              'fire station', 'fire pump',
+                              'engine room label']):
         return 'safety_fixed'
     if 'emergency contact' in n:                   return 'emergency_contacts'
     if 'standing order' in n:                      return 'standing_orders'

@@ -136,7 +136,7 @@ def item_has_notes(item):
 
 
 def draw_items_table(c, items, start_y):
-    """Draw the line items table. Returns y position after table."""
+    """Draw the line items table with pagination. Returns y position after table."""
     col_x = {
         'item':  0.5*inch,
         'color': 3.2*inch,
@@ -146,35 +146,68 @@ def draw_items_table(c, items, start_y):
         'total': 6.1*inch,
     }
     row_h      = 0.28*inch
-    notes_h    = 0.20*inch   # extra height for production notes sub-line
+    notes_h    = 0.20*inch
+    BOTTOM_MARGIN = 1.5*inch   # stop drawing rows below this y position
     y          = start_y
 
-    # Header row background
-    c.setFillColor(STEEL)
-    c.rect(0.4*inch, y - row_h + 4, PAGE_W - 0.8*inch, row_h, fill=1, stroke=0)
+    def draw_table_header(y):
+        c.setFillColor(STEEL)
+        c.rect(0.4*inch, y - row_h + 4, PAGE_W - 0.8*inch, row_h, fill=1, stroke=0)
+        c.setFillColor(BRASS_LT)
+        c.setFont('Helvetica-Bold', 7.5)
+        headers = [
+            ('item',  'ITEM / DESCRIPTION'),
+            ('color', 'COLOR'),
+            ('mount', 'MOUNTING'),
+            ('qty',   'QTY'),
+            ('unit',  'UNIT'),
+            ('total', 'TOTAL'),
+        ]
+        for key, label in headers:
+            if key in ('qty', 'unit', 'total'):
+                c.drawCentredString(col_x[key] + 0.2*inch, y - row_h + 10, label)
+            else:
+                c.drawString(col_x[key], y - row_h + 10, label)
+        return y - row_h
 
-    # Header labels
-    c.setFillColor(BRASS_LT)
-    c.setFont('Helvetica-Bold', 7.5)
-    headers = [
-        ('item',  'ITEM / DESCRIPTION'),
-        ('color', 'COLOR'),
-        ('mount', 'MOUNTING'),
-        ('qty',   'QTY'),
-        ('unit',  'UNIT'),
-        ('total', 'TOTAL'),
-    ]
-    for key, label in headers:
-        if key in ('qty', 'unit', 'total'):
-            c.drawCentredString(col_x[key] + 0.2*inch, y - row_h + 10, label)
-        else:
-            c.drawString(col_x[key], y - row_h + 10, label)
-    y -= row_h
+    def start_new_page():
+        """Finish current page and start a new one with header."""
+        c.showPage()
+        # Navy background — matches main page
+        c.setFillColor(NAVY)
+        c.rect(0, 0, PAGE_W, PAGE_H, fill=1, stroke=0)
+        # Minimal continuation header
+        c.setFillColor(NAVY)
+        c.rect(0, PAGE_H - 0.5*inch, PAGE_W, 0.5*inch, fill=1, stroke=0)
+        c.setFillColor(BRASS)
+        c.rect(0, PAGE_H - 0.5*inch - 2, PAGE_W, 2, fill=1, stroke=0)
+        c.setFillColor(WHITE)
+        c.setFont('Helvetica-Bold', 9)
+        c.drawString(0.5*inch, PAGE_H - 0.32*inch, 'HARBOR')
+        hw = c.stringWidth('HARBOR', 'Helvetica-Bold', 9)
+        c.setFillColor(BRASS)
+        c.drawString(0.5*inch + hw, PAGE_H - 0.32*inch, 'SPEC\u2122')
+        c.setFillColor(FOG)
+        c.setFont('Helvetica', 7.5)
+        c.drawRightString(PAGE_W - 0.5*inch, PAGE_H - 0.32*inch, 'continued...')
+        new_y = PAGE_H - 0.7*inch
+        return draw_table_header(new_y)
+
+    # Draw initial header
+    y = draw_table_header(y)
 
     # Item rows
     for i, item in enumerate(items):
         has_notes  = item_has_notes(item)
         this_row_h = row_h + (notes_h if has_notes else 0)
+
+        # Check if we need a new page
+        if y - this_row_h < BOTTOM_MARGIN:
+            # Draw bottom border on current page
+            c.setStrokeColor(STEEL)
+            c.setLineWidth(0.5)
+            c.line(0.4*inch, y + 4, PAGE_W - 0.4*inch, y + 4)
+            y = start_new_page()
 
         row_bg = HexColor('#0f2336') if i % 2 == 0 else HexColor('#0d1b2a')
         c.setFillColor(row_bg)
@@ -183,19 +216,24 @@ def draw_items_table(c, items, start_y):
         unit_price = item['price'] + (5 if item.get('colorExtra') else 0)
         line_total = unit_price * item['qty']
 
-        # Item name — append (Custom) badge if applicable
         tt        = item.get('textType', 'standard')
         name_note = ' \u2014 Custom Text' if tt == 'custom' else ''
+        full_name = item['name'] + name_note
+
+        # Truncate name to fit item column (stops before color column)
+        max_name_w = col_x['color'] - col_x['item'] - 4
+        c.setFont('Helvetica-Bold', 8.5)
+        while c.stringWidth(full_name, 'Helvetica-Bold', 8.5) > max_name_w and len(full_name) > 10:
+            full_name = full_name[:-1]
+        if full_name != item['name'] + name_note:
+            full_name = full_name[:-1] + '\u2026'  # ellipsis
 
         c.setFillColor(WHITE)
-        c.setFont('Helvetica-Bold', 8.5)
-        c.drawString(col_x['item'], y - row_h + 10, item['name'] + name_note)
+        c.drawString(col_x['item'], y - row_h + 10, full_name)
 
-        # Production notes sub-line (e.g. dust cover measurements)
         if has_notes:
             c.setFillColor(BRASS_LT)
             c.setFont('Helvetica', 7.5)
-            # Truncate to fit column width — max ~65 chars before color col
             notes_str = str(tt)[:90]
             c.drawString(col_x['item'] + 6, y - row_h - 4, notes_str)
 
@@ -386,6 +424,28 @@ def generate_invoice(order, output_path=None):
     c.drawString(0.5*inch, table_start_y + 0.18*inch, 'ORDER ITEMS')
 
     after_table_y = draw_items_table(c, items, table_start_y)
+
+    # If totals won't fit on current page, start a new one
+    TOTALS_HEIGHT = 2.2*inch
+    if after_table_y < TOTALS_HEIGHT + 1.8*inch:
+        c.showPage()
+        c.setFillColor(NAVY)
+        c.rect(0, 0, PAGE_W, PAGE_H, fill=1, stroke=0)
+        # Minimal header for totals page
+        c.setFillColor(NAVY)
+        c.rect(0, PAGE_H - 0.5*inch, PAGE_W, 0.5*inch, fill=1, stroke=0)
+        c.setFillColor(BRASS)
+        c.rect(0, PAGE_H - 0.5*inch - 2, PAGE_W, 2, fill=1, stroke=0)
+        c.setFillColor(WHITE)
+        c.setFont('Helvetica-Bold', 9)
+        c.drawString(0.5*inch, PAGE_H - 0.32*inch, 'HARBOR')
+        hw = c.stringWidth('HARBOR', 'Helvetica-Bold', 9)
+        c.setFillColor(BRASS)
+        c.drawString(0.5*inch + hw, PAGE_H - 0.32*inch, 'SPEC\u2122')
+        c.setFillColor(FOG)
+        c.setFont('Helvetica', 7.5)
+        c.drawRightString(PAGE_W - 0.5*inch, PAGE_H - 0.32*inch, f'Invoice {inv_num} \u2014 continued')
+        after_table_y = PAGE_H - 0.9*inch
 
     draw_totals(c, subtotal, shipping, tax_rate, tax_amt, total,
                 order.get('county',''), after_table_y)

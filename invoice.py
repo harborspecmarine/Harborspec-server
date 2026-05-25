@@ -111,6 +111,18 @@ def draw_addresses(c, order):
     c.drawString(right_x, y, order.get('name', ''))
     y -= 0.17*inch
 
+    if order.get('company'):
+        c.setFillColor(BRASS_LT)
+        c.setFont('Helvetica-Bold', 8.5)
+        c.drawString(right_x, y, order['company'])
+        y -= 0.16*inch
+
+    if order.get('vessel'):
+        c.setFillColor(BRASS)
+        c.setFont('Helvetica-Bold', 8.5)
+        c.drawString(right_x, y, f"Vessel: {order['vessel']}")
+        y -= 0.16*inch
+
     c.setFillColor(FOG)
     c.setFont('Helvetica', 8.5)
     to_lines = [
@@ -120,8 +132,6 @@ def draw_addresses(c, order):
     ]
     if order.get('phone'):
         to_lines.append(order['phone'])
-    if order.get('vessel'):
-        to_lines.append(f"Vessel: {order['vessel']}")
 
     for line in to_lines:
         if line.strip():

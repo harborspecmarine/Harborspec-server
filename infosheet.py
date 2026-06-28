@@ -34,17 +34,18 @@ def detect_product_type(item_name):
     if 'loss of steering' in n:                    return 'loss_of_steering'
     if 'bnwas' in n:                               return 'bnwas'
     if 'tow wire' in n or 'capacit' in n:          return 'tow_wire'
-    if 'compass' in n:                             return 'compass_frame'
     if 'custom plaque' in n:                       return 'custom_plaque'
     if 'dust cover' in n:                          return 'dust_cover'
-    if 'multi-switch' in n or 'switch panel' in n: return 'multi_switch'
     if 'gang' in n or 'outlet' in n or 'plate' in n or 'cover' in n:
         return 'wall_plate'
     if any(x in n for x in ['general alarm', 'muster station', 'life jacket',
                               'watertight', 'off watch', 'crew sleeping',
                               'smoking area', 'visitor sign',
                               'fire station', 'fire pump',
-                              'engine room label']):
+                              'engine room label', 'marpol', 'oil pollution',
+                              'co2 system', 'no discharge', 'no unauthorized',
+                              'emergency escape', 'multi-switch', 'switch panel',
+                              'compass frame', 'compass card', 'compass']):
         return 'safety_fixed'
     if 'emergency contact' in n:                   return 'emergency_contacts'
     if 'standing order' in n:                      return 'standing_orders'
@@ -209,6 +210,7 @@ def sheet_pilot_card(c, acro, item, invoice_num, order_date):
     y = draw_two_fields(c, acro, y, 'Official Number', 'official_num', 'Call Sign', 'call_sign')
     y = draw_two_fields(c, acro, y, 'Length (ft)', 'length', 'Breadth (ft)', 'breadth')
     y = draw_two_fields(c, acro, y, 'Depth (ft)', 'depth', 'Air Draft (ft)', 'air_draft')
+    y = draw_two_fields(c, acro, y, 'Mast Down (ft)', 'mast_down', 'Height of Eye (ft)', 'height_of_eye')
     y = draw_two_fields(c, acro, y, 'GRT', 'grt', 'NRT', 'nrt')
     y = draw_field(c, acro, y, 'Phone Number', 'phone')
     y -= 0.1*inch
@@ -428,6 +430,31 @@ def sheet_tow_wire(c, acro, item, invoice_num, order_date):
         'Use the Wire Length Calculator at harborspecmarine.com/wire-calculator.html to get your values, then fill in below.')
     y = draw_section_title(c, y, 'VESSEL INFO')
     y = draw_field(c, acro, y, 'Vessel Name', 'vessel_name')
+    y = draw_two_fields(c, acro, y, 'Wire Diameter (inches)', 'wire_dia',
+                        'Wire Type (e.g. 6x19 IWRC)', 'wire_type')
+    y -= 0.05*inch
+    y = draw_section_title(c, y, 'DRUM DIMENSIONS (optional \u2014 use Wire Calculator)')
+
+    # Tip box
+    c.setFillColor(HexColor('#eaf2f8'))
+    c.setStrokeColor(HexColor('#b0cde0'))
+    c.setLineWidth(0.6)
+    tip_h = 0.38*inch
+    c.roundRect(0.5*inch, y - tip_h, PAGE_W - inch, tip_h, 3, fill=1, stroke=1)
+    c.setFillColor(NAVY)
+    c.setFont('Helvetica-Bold', 7.5)
+    c.drawString(0.65*inch, y - 0.14*inch, '\u2139  Tip:')
+    c.setFont('Helvetica', 7.5)
+    c.drawString(0.92*inch, y - 0.14*inch,
+        'Enter drum dimensions at harborspecmarine.com/wire-calculator.html')
+    c.drawString(0.65*inch, y - 0.27*inch,
+        'to auto-calculate all layer lengths, then paste results in the table below.')
+    y -= tip_h + 0.1*inch
+
+    y = draw_two_fields(c, acro, y, 'Drum Width (inches)', 'drum_width',
+                        'Core Diameter (inches)', 'drum_core')
+    y = draw_two_fields(c, acro, y, 'Flange Diameter (inches)', 'drum_flange',
+                        'Total Wire on Drum (feet)', 'total_wire')
     y -= 0.1*inch
     y = draw_section_title(c, y, 'WIRE LENGTH TABLE (center to center on drum)')
 
@@ -559,9 +586,14 @@ def sheet_wall_plate(c, acro, item, invoice_num, order_date):
     for i in range(1, positions + 1):
         y = draw_field(c, acro, y, f'Position {i} — Circuit Label', f'circuit_{i}')
     y -= 0.1*inch
-    y = draw_section_title(c, y, 'NOTES')
-    y = draw_field(c, acro, y, 'Cutout type, any special requests', 'notes',
-                   height=0.6*inch, multiline=True)
+    y = draw_section_title(c, y, 'CUTOUT TYPE')
+    y = draw_field(c, acro, y,
+                   'Cutout type for each position: Rocker / Toggle / Duplex / Custom (describe below)',
+                   'cutout_type')
+    y -= 0.05*inch
+    y = draw_section_title(c, y, 'NOTES (optional)')
+    y = draw_field(c, acro, y, 'Custom cutout details or any special requests', 'notes',
+                   height=0.5*inch, multiline=True)
     draw_footer(c, invoice_num, 1, 1)
 
 
@@ -711,6 +743,70 @@ def sheet_standing_orders(c, acro, item, invoice_num, order_date):
     draw_footer(c, invoice_num, 1, 1)
 
 
+# ── Combined wall plate sheet ──────────────────────────────────────────────────
+def generate_wall_plate_combined(items, invoice_num, output_path):
+    """Generate a single info sheet covering all wall plate items in one order."""
+    order_date = datetime.now().strftime('%B %d, %Y')
+    c    = canvas.Canvas(output_path, pagesize=letter)
+    acro = c.acroForm
+    c.setTitle(f'HarborSPEC Wall Plates — {invoice_num}')
+    c.setFillColor(WHITE)
+    c.rect(0, 0, PAGE_W, PAGE_H, fill=1, stroke=0)
+
+    draw_header(c, invoice_num, 'Wall Plates / Outlet Covers', order_date)
+    y = PAGE_H - 1.65*inch
+    y = draw_instructions(c, y,
+        'Fill in labels for each plate ordered. '
+        'Cutout options: Rocker / Toggle / Duplex / Custom (describe in notes).')
+
+    for idx, item in enumerate(items):
+        name = item.get('name', f'Plate {idx+1}')
+        # Detect positions
+        positions = 1
+        n = name.lower()
+        if '2-gang' in n or 'double' in n: positions = 2
+        elif '3-gang' in n: positions = 3
+        elif '4-gang' in n: positions = 4
+
+        # Check if we need a new page
+        needed = (0.3 + positions * 0.28 + 0.5) * inch
+        if y - needed < 1.2*inch and idx > 0:
+            draw_footer(c, invoice_num, 1, 1)
+            c.showPage()
+            c.setFillColor(WHITE)
+            c.rect(0, 0, PAGE_W, PAGE_H, fill=1, stroke=0)
+            # Continuation mini-header
+            c.setFillColor(NAVY)
+            c.rect(0, PAGE_H - 0.5*inch, PAGE_W, 0.5*inch, fill=1, stroke=0)
+            c.setFillColor(WHITE)
+            c.setFont('Helvetica-Bold', 9)
+            c.drawString(0.5*inch, PAGE_H - 0.32*inch, 'HarborSPEC\u2122')
+            c.setFillColor(BRASS)
+            c.setFont('Helvetica', 8)
+            c.drawRightString(PAGE_W - 0.5*inch, PAGE_H - 0.32*inch, f'{invoice_num} \u2014 continued')
+            y = PAGE_H - 0.7*inch
+
+        y = draw_section_title(c, y, f'PLATE {idx+1}: {name.upper()}')
+        y = draw_field(c, acro, y, 'Plate Title (top of plate)',
+                       f'plate_{idx+1}_title',
+                       value=item.get('textType','') if item.get('textType','') not in ('standard','custom','fixed') else '')
+        for pos in range(1, positions + 1):
+            y = draw_field(c, acro, y, f'Position {pos} \u2014 Label',
+                           f'plate_{idx+1}_pos{pos}')
+        y = draw_field(c, acro, y, 'Cutout type (Rocker / Toggle / Duplex / Custom)',
+                       f'plate_{idx+1}_cutout')
+        y -= 0.1*inch
+
+    y = draw_section_title(c, y, 'ADDITIONAL NOTES (optional)')
+    y = draw_field(c, acro, y,
+                   'Any special requests, custom cutout details, or mounting notes',
+                   'notes', height=0.6*inch, multiline=True)
+    draw_footer(c, invoice_num, 1, 1)
+    c.save()
+    print(f'  Combined wall plate sheet: {output_path}')
+    return output_path
+
+
 # ── Sheet dispatcher ───────────────────────────────────────────────────────────
 SHEET_BUILDERS = {
     'pilot_card':           sheet_pilot_card,
@@ -757,16 +853,28 @@ def generate_info_sheet(item, invoice_num, output_path):
 
 def generate_all_info_sheets(order, invoice_num, output_dir='/tmp'):
     """
-    Generate one info sheet PDF per line item in the order.
+    Generate info sheet PDFs for an order.
+    - Fixed/no-input products: skipped
+    - Wall plates: combined into one PDF
+    - Everything else: one PDF per line item
     Returns list of (item_name, pdf_path) tuples.
     """
-    sheets = []
-    items  = order.get('items', [])
+    sheets          = []
+    items           = order.get('items', [])
+    wall_plate_items = []
 
     for idx, item in enumerate(items):
-        # Skip fixed-text safety placards — no customer input needed
-        if detect_product_type(item.get('name', '')) == 'safety_fixed':
+        ptype = detect_product_type(item.get('name', ''))
+
+        # Skip no-sheet products
+        if ptype == 'safety_fixed':
             continue
+
+        # Collect wall plates for combined sheet
+        if ptype == 'wall_plate':
+            wall_plate_items.append(item)
+            continue
+
         safe_name = item.get('name', f'item_{idx}').replace(' ', '_').replace('/', '-')[:40]
         filename  = f'infosheet_{invoice_num}_{idx+1}_{safe_name}.pdf'
         path      = os.path.join(output_dir, filename)
@@ -775,5 +883,14 @@ def generate_all_info_sheets(order, invoice_num, output_dir='/tmp'):
             sheets.append((item.get('name', 'Product'), path))
         except Exception as e:
             print(f'  Info sheet error for {item.get("name")}: {e}')
+
+    # Single combined PDF for all wall plates
+    if wall_plate_items:
+        wp_path = os.path.join(output_dir, f'infosheet_{invoice_num}_wall_plates.pdf')
+        try:
+            generate_wall_plate_combined(wall_plate_items, invoice_num, wp_path)
+            sheets.append(('Wall Plates', wp_path))
+        except Exception as e:
+            print(f'  Wall plate combined sheet error: {e}')
 
     return sheets

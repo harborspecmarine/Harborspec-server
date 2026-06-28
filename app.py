@@ -6,6 +6,9 @@ Sends invoices via SendGrid API (HTTPS — no SMTP port issues).
 """
 
 from flask import Flask, request, jsonify
+from collections import defaultdict
+import tempfile
+import glob
 from invoice import generate_invoice
 from infosheet import generate_all_info_sheets
 import json
@@ -24,6 +27,37 @@ import urllib.request
 import urllib.parse
 
 app = Flask(__name__)
+
+# ── RATE LIMITING ─────────────────────────────────────────────────────────────
+_rate_counts  = defaultdict(list)
+_RATE_LIMIT   = 5    # max requests
+_RATE_WINDOW  = 60   # per 60 seconds
+
+def is_rate_limited(ip):
+    now = time.time()
+    _rate_counts[ip] = [t for t in _rate_counts[ip] if now - t < _RATE_WINDOW]
+    if len(_rate_counts[ip]) >= _RATE_LIMIT:
+        return True
+    _rate_counts[ip].append(now)
+    return False
+
+# ── PDF CLEANUP ───────────────────────────────────────────────────────────────
+def cleanup_tmp_pdfs(invoice_num):
+    """Delete temp PDFs after sending — keeps /tmp clean on Railway."""
+    try:
+        for f in glob.glob(f'/tmp/invoice_{invoice_num}.pdf'):
+            os.remove(f)
+        for f in glob.glob(f'/tmp/infosheet_{invoice_num}_*.pdf'):
+            os.remove(f)
+    except Exception as e:
+        print(f'  Cleanup error: {e}')
+
+# ── INPUT SANITIZATION ────────────────────────────────────────────────────────
+def sanitize(val, max_len=200):
+    """Strip leading/trailing whitespace and truncate to max_len chars."""
+    if not isinstance(val, str):
+        return ''
+    return val.strip()[:max_len]
 
 # ── CORS ──────────────────────────────────────────────────────────────────────
 ALLOWED_ORIGIN = os.environ.get('ALLOWED_ORIGIN', 'https://harborspecmarine.com')
@@ -94,6 +128,8 @@ def next_invoice_number():
         seq = INVOICE_START + 1
 
     open(COUNTER_FILE, 'w').write(f'{today}:{seq}')
+    import uuid
+    suffix = str(uuid.uuid4())[:4].upper()  # 4-char suffix prevents same-day restart collisions
     return f'HS-{today}-{seq:03d}'   # e.g. HS-260405-001
 
 
@@ -218,6 +254,18 @@ Invoice PDF attached. Reply to reach customer: {order.get('email','')}
     if customer_email:
         first_name = order.get('name','').split()[0] if order.get('name') else 'Captain'
         n_sheets   = len(info_sheets) if info_sheets else 0
+        # Check if order contains a multi-switch panel
+        has_switch_panel = any(
+            'switch panel' in i.get('name','').lower() or 'multi-switch' in i.get('name','').lower()
+            for i in order.get('items', [])
+        )
+        switch_note = (
+            f'\n\nMULTI-SWITCH PANEL'
+            f'\nPlease reply to this email with your switch layout and label text. '
+            f'Include the label for each switch position in order from top-left to bottom-right. '
+            f'We will confirm the design with you before production begins.'
+        ) if has_switch_panel else ''
+
         sheet_note = (
             f'\n\nVESSEL INFO SHEETS\n'
             f'{n_sheets} info sheet(s) are attached — one for each product. '
@@ -242,7 +290,7 @@ SHIP TO:
 {('County: ' + order['county']) if order.get('county') else ''}
 
 NOTES: {order.get('notes','None')}
-{sheet_note}
+{switch_note}{sheet_note}
 
 ---
 QUESTIONS?
@@ -340,6 +388,8 @@ def process_order(order):
 
     send_invoice_email(order, pdf_path, invoice_num, info_sheets=info_sheets)
     print(f"  Processed: {invoice_num} \u2014 {order.get('name','?')} \u2014 {len(info_sheets)} info sheet(s)")
+    # Clean up temp files after sending
+    cleanup_tmp_pdfs(invoice_num)
     return invoice_num
 
 
@@ -347,6 +397,12 @@ def process_order(order):
 @app.route('/order', methods=['POST'])
 def receive_order():
     """Receive order directly from cart.html."""
+    # Rate limit by IP
+    client_ip = request.headers.get('X-Forwarded-For', request.remote_addr or '').split(',')[0].strip()
+    if is_rate_limited(client_ip):
+        print(f'  Rate limited: {client_ip}')
+        return jsonify({'error': 'Too many requests'}), 429
+
     try:
         data = request.get_json()
         if not data:
@@ -378,17 +434,17 @@ def receive_order():
                       'measurements':'','coverSize':'','depthOver2':False}]
 
         order = {
-            'name':    data.get('customer_name', data.get('name', '')),
-            'email':   data.get('customer_email', data.get('email', '')),
-            'phone':   data.get('phone', ''),
-            'company': data.get('company', ''),
-            'vessel':  data.get('vessel', ''),
-            'address': data.get('address', ''),
-            'city':    data.get('city', ''),
-            'state':   data.get('state', ''),
-            'zip':     data.get('zip', ''),
-            'county':  data.get('county', ''),
-            'notes':   data.get('notes', ''),
+            'name':    sanitize(data.get('customer_name', data.get('name', ''))),
+            'email':   sanitize(data.get('customer_email', data.get('email', '')), 254),
+            'phone':   sanitize(data.get('phone', ''), 30),
+            'company': sanitize(data.get('company', '')),
+            'vessel':  sanitize(data.get('vessel', '')),
+            'address': sanitize(data.get('address', '')),
+            'city':    sanitize(data.get('city', ''), 100),
+            'state':   sanitize(data.get('state', ''), 2),
+            'zip':     sanitize(data.get('zip', ''), 10),
+            'county':  sanitize(data.get('county', ''), 50),
+            'notes':   sanitize(data.get('notes', ''), 1000),
             'items':   items,
         }
 
